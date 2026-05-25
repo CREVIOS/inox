@@ -25,6 +25,7 @@ export async function generateGo(ir: ApiIR, rootOutDir: string): Promise<Generat
   const writer = createTargetWriter("go", rootOutDir);
   const modulePath = ir.targets.go?.module_path ?? `github.com/generated/${snakeCase(ir.api.package_prefix).replace(/_/g, "-")}`;
   const packageName = goPackageName(modulePath);
+  ir = avoidGoServiceCollisions(ir);
 
   await writer.write(
     "go.mod",
@@ -44,7 +45,7 @@ go 1.23
   // webhooks.go, endpoints_test.go). Prefix them so a resource whose slug matches a
   // reserved name (e.g. a `models` resource) can't clobber the shared types file.
   for (const resource of emittedResources(ir, "go")) {
-    await writer.write(`resource_${resourceFileSlug(resource)}.go`, renderGoResource(ir, packageName, resource));
+    await writer.write(`${goResourceFileName(resourceFileSlug(resource))}.go`, renderGoResource(ir, packageName, resource));
   }
 
   await writer.write("endpoints_test.go", renderGoConformanceTest(ir, packageName));
@@ -52,6 +53,46 @@ go 1.23
   await writer.write("README.md", renderGoReadme(ir, modulePath));
   await formatGoFiles(writer.outDir, writer.files);
   return writer.result();
+}
+
+// Go gives `name_GOOS.go` / `name_GOARCH.go` / `name_test.go` filenames an implicit build
+// constraint, silently excluding the file from other platforms. A resource slug ending in such a
+// token (e.g. `maintenance_windows` -> `_windows.go`) would vanish at build time; append `_gen`
+// to the base filename so the trailing token is always the inert `gen`.
+const GO_FILE_RESERVED = new Set([
+  "aix", "android", "darwin", "dragonfly", "freebsd", "hurd", "illumos", "ios", "js", "linux",
+  "nacl", "netbsd", "openbsd", "plan9", "solaris", "wasip1", "windows", "zos",
+  "386", "amd64", "amd64p32", "arm", "arm64", "arm64be", "armbe", "loong64", "mips", "mips64",
+  "mips64le", "mips64p32", "mips64p32le", "mipsle", "ppc", "ppc64", "ppc64le", "riscv", "riscv64",
+  "s390", "s390x", "sparc", "sparc64", "wasm", "test",
+]);
+
+function goResourceFileName(slug: string): string {
+  const base = `resource_${slug}`;
+  const lastSegment = base.split("_").at(-1) ?? "";
+  return GO_FILE_RESERVED.has(lastSegment) ? `${base}_gen` : base;
+}
+
+// Go is a flat package: a model type named e.g. `WorkersService` collides with the resource
+// service struct `WorkersService`. Return an IR clone (the shared IR is untouched) where any
+// model whose name collides with a `<Resource>Service` type is renamed; goType reads type.name,
+// so every reference stays consistent.
+function avoidGoServiceCollisions(ir: ApiIR): ApiIR {
+  const serviceNames = new Set<string>();
+  for (const resource of ir.resources) {
+    serviceNames.add(`${resource.class_name}Service`);
+  }
+  if (!ir.types.some((type) => serviceNames.has(type.name))) return ir;
+  const taken = new Set([...ir.types.map((type) => type.name), ...serviceNames]);
+  const types = ir.types.map((type) => {
+    if (!serviceNames.has(type.name)) return type;
+    let renamed = `${type.name}Model`;
+    let suffix = 2;
+    while (taken.has(renamed)) renamed = `${type.name}Model${suffix++}`;
+    taken.add(renamed);
+    return { ...type, name: renamed };
+  });
+  return { ...ir, types };
 }
 
 async function formatGoFiles(outDir: string, files: string[]): Promise<void> {

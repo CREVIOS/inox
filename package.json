@@ -42,7 +42,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx tests/e2e.test.ts",
+    "test": "tsx tests/e2e.test.ts && tsx tests/features.test.ts",
     "inox": "tsx src/cli.ts",
     "sdkgen": "tsx src/cli.ts",
     "prepublishOnly": "npm run build"

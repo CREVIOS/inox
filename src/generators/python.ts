@@ -7,7 +7,6 @@ import {
   createTargetWriter,
   emittedResources,
   paginationShape,
-  pathTemplateForPython,
   resourceFileSlug,
   streamEventType,
   targetOperationsForResource,
@@ -49,11 +48,11 @@ build-backend = "hatchling.build"
   }
 
   for (const type of ir.types) {
-    await writer.write(`src/${packageName}/types/${snakeCase(type.name)}.py`, renderPythonType(ir, type));
+    await writer.write(`src/${packageName}/types/${pyTypeModule(type)}.py`, renderPythonType(ir, type));
   }
 
   for (const resource of emittedResources(ir, "python")) {
-    await writer.write(`src/${packageName}/resources/${resourceFileSlug(resource)}.py`, renderPythonResource(ir, resource));
+    await writer.write(`src/${packageName}/resources/${pyModule(resourceFileSlug(resource))}.py`, renderPythonResource(ir, resource));
   }
 
   await writer.write(".github/workflows/release.yml", renderReleaseWorkflow("python", ir));
@@ -205,7 +204,7 @@ function renderPythonClient(ir: ApiIR): string {
   const syncResources = topLevelResources(ir, "python");
   const resourceAssignments = syncResources
     .map((resource) => {
-      const module = resourceFileSlug(resource);
+      const module = pyModule(resourceFileSlug(resource));
       return `        from .resources.${module} import ${resource.class_name}Resource
         self.${resource.name} = ${resource.class_name}Resource(self)
 `;
@@ -213,7 +212,7 @@ function renderPythonClient(ir: ApiIR): string {
     .join("");
   const asyncAssignments = syncResources
     .map((resource) => {
-      const module = resourceFileSlug(resource);
+      const module = pyModule(resourceFileSlug(resource));
       return `        from .resources.${module} import Async${resource.class_name}Resource
         self.${resource.name} = Async${resource.class_name}Resource(self)
 `;
@@ -848,7 +847,7 @@ if __name__ == "__main__":
 }
 
 function renderPythonTypesInit(ir: ApiIR): string {
-  const imports = ir.types.map((type) => `from .${snakeCase(type.name)} import ${type.name}`);
+  const imports = ir.types.map((type) => `from .${pyTypeModule(type)} import ${type.name}`);
   const all = ir.types.map((type) => quote(type.name)).join(", ");
   return `${imports.join("\n")}
 
@@ -859,7 +858,7 @@ __all__ = [${all}]
 function renderPythonResourcesInit(ir: ApiIR): string {
   const resources = emittedResources(ir, "python");
   const imports = resources.map((resource) => {
-    const module = resourceFileSlug(resource);
+    const module = pyModule(resourceFileSlug(resource));
     return `from .${module} import ${resource.class_name}Resource, Async${resource.class_name}Resource`;
   });
   const all = resources.flatMap((resource) => [`${resource.class_name}Resource`, `Async${resource.class_name}Resource`]).map(quote).join(", ");
@@ -898,7 +897,7 @@ ${type.name}: TypeAlias = ${pythonType(ir, type.target)}
 
 function renderPythonObject(ir: ApiIR, type: ObjectTypeIR): string {
   const imports = importsForPythonType(ir, type).filter((name) => name !== type.name);
-  const importLines = imports.map((name) => `from .${snakeCase(name)} import ${name}`);
+  const importLines = imports.map((name) => `from .${pyModule(snakeCase(name))} import ${name}`);
   const typingImports = ["NotRequired", "TypedDict"];
   if (type.fields.some((field) => pythonRefUsesAny(ir, field.type))) typingImports.unshift("Any");
   const header = `from __future__ import annotations
@@ -942,6 +941,27 @@ function isSafePyIdentifier(name: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !PY_KEYWORDS.has(name);
 }
 
+/** A valid Python identifier for a parameter/variable: snake_case, keyword- and digit-safe. */
+function pyIdent(name: string): string {
+  let ident = snakeCase(name);
+  if (ident === "" || /^[0-9]/.test(ident)) ident = `_${ident}`;
+  if (PY_KEYWORDS.has(ident)) ident = `${ident}_`;
+  return ident;
+}
+
+/** A valid Python module name: not a keyword (GitHub's `Import`) and not digit-leading (DO's 1-clicks). */
+function pyModule(slug: string): string {
+  let name = slug;
+  if (/^[0-9]/.test(name)) name = `_${name}`;
+  if (PY_KEYWORDS.has(name)) name = `${name}_`;
+  return name;
+}
+
+/** Module file stem for a generated type, keyword/digit safe. */
+function pyTypeModule(type: { name: string }): string {
+  return pyModule(snakeCase(type.name));
+}
+
 function pythonFieldType(ir: ApiIR, field: FieldIR): string {
   const inner = `${pythonType(ir, field.type)}${field.nullable || field.type.nullable ? " | None" : ""}`;
   return field.required ? inner : `NotRequired[${inner}]`;
@@ -959,12 +979,12 @@ function renderPythonResource(ir: ApiIR, resource: ResourceIR): string {
   for (const operation of operations) {
     collectOperationPythonImports(ir, operation, imports);
   }
-  const importLines = [...imports].map((name) => `from ..types.${snakeCase(name)} import ${name}`);
+  const importLines = [...imports].map((name) => `from ..types.${pyModule(snakeCase(name))} import ${name}`);
   const streamImport = operations.some((operation) => operation.streaming)
     ? "from .._streaming import Stream, AsyncStream\n"
     : "";
   const childImports = children
-    .map((child) => `from .${resourceFileSlug(child)} import ${child.class_name}Resource, Async${child.class_name}Resource`)
+    .map((child) => `from .${pyModule(resourceFileSlug(child))} import ${child.class_name}Resource, Async${child.class_name}Resource`)
     .join("\n");
   const methods = operations
     .flatMap((operation) => renderPythonOperation(ir, operation, false))
@@ -1030,21 +1050,25 @@ function pyParamPlan(ir: ApiIR, operation: OperationIR): PyParamPlan {
   const queryParams = operation.params.filter((param) => param.location === "query");
   const signature: string[] = ["self"];
   for (const param of pathParams) {
-    signature.push(`${snakeCase(param.name)}: ${pythonType(ir, param.type)}`);
+    signature.push(`${pyIdent(param.name)}: ${pythonType(ir, param.type)}`);
   }
   if (operation.request) {
     signature.push(`body: ${pythonType(ir, operation.request.type)}`);
   }
   for (const param of queryParams) {
-    signature.push(`${snakeCase(param.name)}: ${pythonType(ir, param.type)} | None = None`);
+    signature.push(`${pyIdent(param.name)}: ${pythonType(ir, param.type)} | None = None`);
   }
   signature.push("headers: dict[str, str] | None = None");
   signature.push("idempotency_key: str | None = None");
+  // Path f-string interpolates path params by their idiomatic (keyword/digit-safe) names.
+  const pathExpr = pathParams.length
+    ? `f"${operation.path.replace(/\{([^}]+)\}/g, (_m, n: string) => `{${pyIdent(n)}}`)}"`
+    : quote(operation.path);
   return {
-    pathParams: pathParams.map((param) => ({ name: snakeCase(param.name) })),
-    queryParams: queryParams.map((param) => ({ name: snakeCase(param.name), wire: param.wire_name })),
+    pathParams: pathParams.map((param) => ({ name: pyIdent(param.name) })),
+    queryParams: queryParams.map((param) => ({ name: pyIdent(param.name), wire: param.wire_name })),
     signature,
-    pathExpr: pathParams.length ? `f"${pathTemplateForPython(operation.path)}"` : quote(operation.path),
+    pathExpr,
   };
 }
 

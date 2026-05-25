@@ -448,6 +448,20 @@ class IrBuilder {
       }
     }
 
+    // Distinct wire names can collapse to one camelCase identifier (e.g. Twilio's range params
+    // `StartTime<` and `StartTime>`). Keep wire_name exact; make the idiomatic name unique.
+    const used = new Set<string>();
+    for (const param of params) {
+      let name = param.name || "param";
+      if (used.has(name)) {
+        let suffix = 2;
+        while (used.has(`${name}${suffix}`)) suffix += 1;
+        name = `${name}${suffix}`;
+      }
+      used.add(name);
+      param.name = name;
+    }
+
     return params;
   }
 
@@ -575,18 +589,31 @@ class IrBuilder {
 
   private fieldsForObject(schema: OpenApiSchema, parentName: string): FieldIR[] {
     const required = new Set(schema.required ?? []);
-    return Object.entries(schema.properties ?? {}).map(([fieldName, fieldSchema]) => ({
-      name: camelCase(fieldName),
-      wire_name: fieldName,
-      type: this.schemaToTypeRef(fieldSchema, `${parentName}${pascalCase(fieldName)}`),
-      required: required.has(fieldName),
-      nullable: Boolean(fieldSchema.nullable),
-      read_only: Boolean(fieldSchema.readOnly),
-      write_only: Boolean(fieldSchema.writeOnly),
-      description: fieldSchema.description,
-      default_value: fieldSchema.default,
-      const_value: fieldSchema.const ?? (fieldSchema.enum?.length === 1 ? fieldSchema.enum[0] : undefined),
-    }));
+    // Distinct wire names can collapse to the same camelCase identifier (e.g. `start_time` and
+    // `startTime`, or GitHub's `+1`/`-1`). Keep wire_name exact (serde maps by it) but ensure the
+    // idiomatic `name` is unique within the object so generated types don't get duplicate members.
+    const used = new Set<string>();
+    return Object.entries(schema.properties ?? {}).map(([fieldName, fieldSchema]) => {
+      let name = camelCase(fieldName) || "field";
+      if (used.has(name)) {
+        let suffix = 2;
+        while (used.has(`${name}${suffix}`)) suffix += 1;
+        name = `${name}${suffix}`;
+      }
+      used.add(name);
+      return {
+        name,
+        wire_name: fieldName,
+        type: this.schemaToTypeRef(fieldSchema, `${parentName}${pascalCase(fieldName)}`),
+        required: required.has(fieldName),
+        nullable: Boolean(fieldSchema.nullable),
+        read_only: Boolean(fieldSchema.readOnly),
+        write_only: Boolean(fieldSchema.writeOnly),
+        description: fieldSchema.description,
+        default_value: fieldSchema.default,
+        const_value: fieldSchema.const ?? (fieldSchema.enum?.length === 1 ? fieldSchema.enum[0] : undefined),
+      };
+    });
   }
 
   private schemaToTypeRef(schema: OpenApiSchema, nameHint: string): TypeRefIR {
