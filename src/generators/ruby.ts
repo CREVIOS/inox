@@ -422,6 +422,17 @@ ${oauthInit}${webhookInit}${resourceInit}
       end
     end
 
+    # Follows a (possibly absolute) URL for Link-header pagination.
+    def request_absolute(absolute_url, headers: nil, with_meta: false)
+      if absolute_url.start_with?(@base_url)
+        path = absolute_url[@base_url.length..]
+      else
+        parsed = URI(absolute_url)
+        path = parsed.path + (parsed.query ? "?#{parsed.query}" : "")
+      end
+      request("get", path, headers: headers, with_meta: with_meta)
+    end
+
     def stream(method, path, query: nil, body: nil, headers: nil, sse: true, done_sentinel: nil)
       uri = URI("#{@base_url}#{path}")
       if query
@@ -845,6 +856,23 @@ function renderRubyPagerWithIr(ir: ApiIR, mod: string, operation: OperationIR): 
   const callArgs = [...plan.positional.filter((p) => p !== "body"), ...plan.query.map((q) => `${q.name}: ${q.name}`), "headers: headers"].join(", ");
   const itemsAttr = rubyAttr(shape.itemsField.name);
   const advance = rubyPagerAdvance(shape);
+
+  // RFC 5988 Link-header pagination: read the `Link` header (rel="next") via with_meta.
+  if (shape.kind === "link_header") {
+    return `    def ${snakeCase(operation.name)}_auto_paging(${signature})
+      return enum_for(:${snakeCase(operation.name)}_auto_paging, ${rbEnumArgs(plan)}) unless block_given?
+      result = @client.request("get", "${plan.pathInterp}", query: ${rbQueryHash(plan)}, headers: headers, with_meta: true)
+      loop do
+        page = ${operation.response ? rubyFromJson(ir, operation.response, "result.data", mod) : "result.data"}
+        items = page.${itemsAttr} || []
+        items.each { |item| yield item }
+        link = result.headers["Link"]
+        nxt = link && link[/<([^>]+)>\\s*;\\s*rel="?next"?/, 1]
+        break unless nxt
+        result = @client.request_absolute(nxt, headers: headers, with_meta: true)
+      end
+    end`;
+  }
   const init = shape.kind === "offset" && shape.offsetParam
     ? `      ${snakeCase(shape.offsetParam)} ||= 0\n`
     : shape.kind === "page_number" && shape.pageParam

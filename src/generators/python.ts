@@ -391,13 +391,13 @@ ${oauthMethods}${oauthFlowMethods}
                 time.sleep(_backoff_seconds(attempt))
         raise RuntimeError("request retry loop exited unexpectedly")
 
-    def request_absolute(self, absolute_url: str, *, headers: dict[str, str] | None = None) -> Any:
+    def request_absolute(self, absolute_url: str, *, headers: dict[str, str] | None = None, with_meta: bool = False) -> Any:
         if absolute_url.startswith(self.base_url):
             path = absolute_url[len(self.base_url):]
         else:
             parsed = urllib.parse.urlparse(absolute_url)
             path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-        return self.request("get", path, headers=headers)
+        return self.request("get", path, headers=headers, with_meta=with_meta)
 
     def stream(
         self,
@@ -435,6 +435,9 @@ ${oauthMethods}${oauthFlowMethods}
     async def async_request(self, method: str, path: str, **kwargs: Any) -> Any:
         return await asyncio.to_thread(lambda: self.request(method, path, **kwargs))
 
+    async def async_request_absolute(self, absolute_url: str, **kwargs: Any) -> Any:
+        return await asyncio.to_thread(lambda: self.request_absolute(absolute_url, **kwargs))
+
     async def async_request_stream(self, method: str, path: str, **kwargs: Any) -> Iterator[Any]:
         return await asyncio.to_thread(lambda: self.stream(method, path, **kwargs))
 
@@ -459,6 +462,18 @@ ${asyncAssignments || "        pass\n"}
 
 def _backoff_seconds(attempt: int) -> float:
     return _computed_backoff_seconds(attempt, None, None)
+
+
+def _parse_link_next(value: str | None) -> str | None:
+    """Parse an RFC 5988 Link header and return the rel="next" URL, if present."""
+    if not value:
+        return None
+    import re as _re
+    for part in value.split(","):
+        match = _re.search(r'<([^>]+)>\\s*;\\s*rel="?next"?', part)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _computed_backoff_seconds(attempt: int, retry_after: str | None, retry_after_ms: str | None) -> float:
@@ -1262,6 +1277,32 @@ function renderPythonPaginationMethod(ir: ApiIR, operation: OperationIR, asyncMe
   ].join(", ");
   const listCall = `${awaitKw}self.${snakeCase(operation.name)}(${callArgs})`;
   const advance = pythonPagerAdvance(shape, itemsField);
+
+  // RFC 5988 Link-header pagination: drive request() with with_meta to read the `Link` header.
+  if (shape.kind === "link_header") {
+    const queryDict = plan.queryParams.length
+      ? `{${plan.queryParams.map((param) => `${quote(param.wire)}: ${param.name}`).join(", ")}}`
+      : "None";
+    const reqFn = asyncMethod ? "self._client.async_request" : "self._client.request";
+    const absFn = asyncMethod ? "self._client.async_request_absolute" : "self._client.request_absolute";
+    return `${methodPrefix} ${snakeCase(operation.name)}_auto_paging(${signature.join(", ")}) -> ${iteratorType}[${itemType}]:
+    import re as _re
+    result = ${awaitKw}${reqFn}("${operation.http_method}", ${plan.pathExpr}, query=${queryDict}, headers=headers, with_meta=True)
+    while True:
+        page = result.data if hasattr(result, "data") else result
+        for item in page.get(${itemsField}, []):
+            yield item
+        link_value = (result.headers or {}).get("link") or (result.headers or {}).get("Link")
+        next_url = None
+        for _part in (link_value or "").split(","):
+            _m = _re.search(r'<([^>]+)>\\s*;\\s*rel="?next"?', _part)
+            if _m:
+                next_url = _m.group(1)
+                break
+        if not next_url:
+            break
+        result = ${awaitKw}${absFn}(next_url, headers=headers, with_meta=True)`;
+  }
 
   const forward = `${methodPrefix} ${snakeCase(operation.name)}_auto_paging(${signature.join(", ")}) -> ${iteratorType}[${itemType}]:
 ${indent(pythonPagerInit(shape), 4)}

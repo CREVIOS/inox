@@ -42,6 +42,9 @@ The teams that depended on a hosted pipeline now need one they can **run
 themselves, forever, offline**. Inox is that — and aims to be better than what it
 replaces.
 
+> **Coming off Stainless?** See the [migration guide](MIGRATING.md) — export your spec,
+> write a small `inox.yml`, `inox generate`. Your spec never leaves your infra.
+
 ## 60-second proof
 
 A real production API. A **13-line** config. SDKs that compile.

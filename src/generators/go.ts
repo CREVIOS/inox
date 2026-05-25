@@ -629,6 +629,55 @@ func (client *Client) doAbsolute(ctx context.Context, absURL string, out any) er
 \treturn nil
 }
 
+// doAbsoluteRaw is doAbsolute but also returns the response headers (for Link-header pagination).
+func (client *Client) doAbsoluteRaw(ctx context.Context, absURL string, out any) (http.Header, error) {
+\trequestURL := absURL
+\tif !strings.HasPrefix(absURL, "http") {
+\t\trequestURL = client.baseURL + absURL
+\t}
+\trequest, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tclient.applyDefaultHeaders(request, 0)
+\tif err := client.authorize(ctx, request); err != nil {
+\t\treturn nil, err
+\t}
+\tresponse, err := client.httpClient.Do(request)
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tbody, _ := io.ReadAll(response.Body)
+\tresponse.Body.Close()
+\tif response.StatusCode < 200 || response.StatusCode >= 300 {
+\t\treturn response.Header, newAPIError(response.StatusCode, body, response.Header)
+\t}
+\tif out != nil {
+\t\tif err := json.Unmarshal(body, out); err != nil {
+\t\t\treturn response.Header, err
+\t\t}
+\t}
+\treturn response.Header, nil
+}
+
+// parseLinkNext parses an RFC 5988 Link header and returns the rel="next" URL, if present.
+func parseLinkNext(headers http.Header) string {
+\tfor _, value := range headers.Values("Link") {
+\t\tfor _, part := range strings.Split(value, ",") {
+\t\t\tlt := strings.Index(part, "<")
+\t\t\tgt := strings.Index(part, ">")
+\t\t\tif lt < 0 || gt <= lt {
+\t\t\t\tcontinue
+\t\t\t}
+\t\t\trel := part[gt:]
+\t\t\tif strings.Contains(rel, "rel=\\"next\\"") || strings.Contains(rel, "rel=next") {
+\t\t\t\treturn part[lt+1 : gt]
+\t\t\t}
+\t\t}
+\t}
+\treturn ""
+}
+
 func (client *Client) doEncoded(ctx context.Context, method string, path string, query url.Values, body any, out any, encoding string, meta *rawMeta) error {
 \tvar payload []byte
 \tcontentType := "application/json"
@@ -1547,6 +1596,69 @@ function renderGoPager(ir: ApiIR, resource: ResourceIR, operation: OperationIR):
   const paramsName = operationTypeName(resource, operation, "Params");
   const itemType = goType(ir, shape.itemType, false);
   const itemsField = pascalCase(shape.itemsField.name);
+  // link_header (RFC 5988): the next-page URL is in the response `Link` header (rel="next").
+  if (shape.kind === "link_header") {
+    const respType = operation.response ? trimPointer(goType(ir, operation.response, false)) : "any";
+    const hasParams = operation.params.length > 0 || Boolean(operation.request);
+    const paramsArg = hasParams ? `, params ${paramsName}` : "";
+    const path = renderGoPath(operation);
+    const queryLines = operation.params
+      .filter((param) => param.location === "query")
+      .map((param) => renderGoQueryParam(ir, param))
+      .join("\n");
+    return `func (service *${resource.class_name}Service) ${pascalCase(operation.name)}AutoPaging(ctx context.Context${paramsArg}) *${pagerName} {
+\tpath := ${path}
+\tquery := url.Values{}
+${queryLines ? `${queryLines}\n` : ""}\tinitial := path
+\tif len(query) > 0 {
+\t\tinitial += "?" + query.Encode()
+\t}
+\treturn &${pagerName}{service: service, ctx: ctx, nextURL: initial, index: -1}
+}
+
+type ${pagerName} struct {
+\tservice *${resource.class_name}Service
+\tctx     context.Context
+\titems   []${itemType}
+\tindex   int
+\tnextURL string
+\tcurrent ${itemType}
+\terr     error
+}
+
+func (pager *${pagerName}) Next() bool {
+\tif pager.err != nil {
+\t\treturn false
+\t}
+\tfor {
+\t\tpager.index++
+\t\tif pager.index < len(pager.items) {
+\t\t\tpager.current = pager.items[pager.index]
+\t\t\treturn true
+\t\t}
+\t\tif pager.nextURL == "" {
+\t\t\treturn false
+\t\t}
+\t\tvar pg ${respType}
+\t\theaders, err := pager.service.client.doAbsoluteRaw(pager.ctx, pager.nextURL, &pg)
+\t\tif err != nil {
+\t\t\tpager.err = err
+\t\t\treturn false
+\t\t}
+\t\tpager.items = pg.${itemsField}
+\t\tpager.index = -1
+\t\tpager.nextURL = parseLinkNext(headers)
+\t}
+}
+
+func (pager *${pagerName}) Current() ${itemType} {
+\treturn pager.current
+}
+
+func (pager *${pagerName}) Err() error {
+\treturn pager.err
+}`;
+  }
   // cursor_url: follow the absolute next-page URL from the response instead of mutating params.
   if (shape.kind === "cursor_url" && shape.nextUrlField) {
     const respType = operation.response ? trimPointer(goType(ir, operation.response, false)) : "any";

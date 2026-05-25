@@ -534,6 +534,15 @@ ${
   }
 `
     : ""
+}${
+  ir.client.oauth2
+    ? `
+  /** OAuth2 refresh-token grant: exchange a stored refresh token for a fresh access token (rotation-aware). */
+  refreshToken(refreshToken?: string): Promise<string> {
+    return this._client.refreshAccessToken(refreshToken);
+  }
+`
+    : ""
 }}
 `;
 }
@@ -808,6 +817,7 @@ export class ApiClient {
   private readonly validateResponses: boolean;
   private readonly validate?: (value: unknown, typeName: string) => void;
   private cachedToken?: string;
+  private cachedRefreshToken?: string;
   private tokenExpiresAt = 0;
 
   constructor(options: Required<Pick<ClientOptions, "baseUrl" | "timeoutMs" | "maxRetries" | "retryStatuses">> & Pick<ClientOptions, "apiKey" | "packageVersion" | "omitStainlessHeaders" | "idempotencyHeader" | "hooks"> & { oauth2?: OAuth2Config; basicAuth?: string; authPrefix?: string; validateResponses?: boolean; validate?: (value: unknown, typeName: string) => void }) {
@@ -913,10 +923,18 @@ export class ApiClient {
       const text = await response.text();
       throw createApiError(response.status, text ? safeJson(text) : undefined, response.headers.get("x-request-id") ?? undefined, response.headers);
     }
-    const data = (await response.json()) as { access_token: string; expires_in?: number };
+    const data = (await response.json()) as { access_token: string; expires_in?: number; refresh_token?: string };
     this.cachedToken = data.access_token;
     this.tokenExpiresAt = Date.now() + ((data.expires_in ?? 3600) - 30) * 1000;
+    if (data.refresh_token) this.cachedRefreshToken = data.refresh_token; // rotation: keep the newest
     return data.access_token;
+  }
+
+  /** OAuth2 refresh-token grant: exchange a stored refresh token for a fresh access token. */
+  async refreshAccessToken(refreshToken?: string): Promise<string> {
+    const token = refreshToken ?? this.cachedRefreshToken;
+    if (!token) throw new ApiError(0, "no refresh token available; complete an authorization-code or device flow first");
+    return this.oauthTokenRequest({ grant_type: "refresh_token", refresh_token: token });
   }
 
   private buildUrl(path: string, query: Record<string, unknown> | undefined): URL {

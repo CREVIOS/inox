@@ -22,3 +22,7 @@ specs/gallery/*.genlog
 benchmarks/specs/
 benchmarks/out/
 gallery/out/
+
+# Internal go-to-market playbooks (keep local, not in public repo)
+GO-TO-MARKET.md
+marketing/
