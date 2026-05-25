@@ -3,9 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Inox — one spec, every SDK · technical datasheet</title>
-<meta name="description" content="Self-hosted, air-gapped SDK generator. Your OpenAPI spec → idiomatic SDKs in 6 languages + an MCP server, zero runtime dependencies, verified on every build.">
-<meta property="og:title" content="Inox — one spec, every SDK">
+<title>Inox — self-hosted OpenAPI SDK generator (open Stainless alternative)</title>
+<meta name="description" content="Inox is a free, open-source, self-hosted OpenAPI SDK generator — turn one OpenAPI/Swagger spec into idiomatic SDKs for TypeScript, Python, Go, Java, Ruby and C#, plus an MCP server. Zero runtime dependencies, air-gapped, verified on every build. The open alternative to Stainless, Speakeasy and Fern.">
+<meta name="keywords" content="OpenAPI SDK generator, self-hosted SDK generator, Stainless alternative, Speakeasy alternative, Fern alternative, OpenAPI to SDK, Swagger SDK generator, MCP server from OpenAPI, TypeScript Python Go Java Ruby C# SDK, open source SDK generator, codegen">
+<meta name="author" content="Inox">
+<meta property="og:title" content="Inox — self-hosted OpenAPI SDK generator (open Stainless alternative)">
 <meta property="og:description" content="Your OpenAPI spec → 6 idiomatic SDKs + an MCP server. Self-hosted, zero deps, verified.">
 <meta property="og:image" content="../assets/inox-hero.png">
 <meta property="og:type" content="website">
@@ -33,6 +35,49 @@
   "programmingLanguage": ["TypeScript", "Python", "Go", "Java", "Ruby", "C#"],
   "keywords": "openapi, sdk generator, codegen, mcp, model context protocol, self-hosted, stainless alternative",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "Inox",
+  "url": "https://crevios.github.io/inox/",
+  "description": "Self-hosted OpenAPI SDK generator — one spec to SDKs in 6 languages + an MCP server.",
+  "publisher": { "@type": "Organization", "name": "Inox", "url": "https://github.com/CREVIOS/inox" }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "What is the best open-source, self-hosted alternative to Stainless?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Inox is a free, open-source, self-hosted OpenAPI SDK generator. After Stainless was acquired and wound down its hosted generator in May 2026, Inox runs the same kind of pipeline entirely on your own machine — air-gapped, zero runtime dependencies, verified on every build." }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I generate an SDK from an OpenAPI spec?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Install Inox (npx @crevious/inox), then run `inox generate --out sdk`. Inox auto-derives resources, methods, schemas, pagination, and auth from the spec and emits idiomatic SDKs for TypeScript, Python, Go, Java, Ruby, and C#." }
+    },
+    {
+      "@type": "Question",
+      "name": "Which languages does Inox generate SDKs for?",
+      "acceptedAnswer": { "@type": "Answer", "text": "TypeScript, Python, Go, Java, Ruby, and C# — each with a zero-dependency runtime and verified by runtime endpoint conformance on every build." }
+    },
+    {
+      "@type": "Question",
+      "name": "Can Inox turn an API into MCP tools for AI agents?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. `inox products` emits a zero-dependency MCP server (protocol 2025-06-18) with typed, dynamic, and code tool modes, plus read-only scoping, so any OpenAPI API becomes agent-callable." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is Inox free?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes — Inox is MIT-licensed and free. It runs fully offline; your spec never leaves your machine." }
+    }
+  ]
 }
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -326,6 +371,21 @@ node out/mcp/dist/server.js --tools typed --scope read   <span class="c-cmt"># 1
 <span class="kw">inox</span> init --force
 <span class="kw">inox</span> generate --out sdk
 <span class="kw">inox</span> verify  --out sdk                   <span class="ok"># PASS × 6 languages</span></pre>
+  </div>
+</div></section>
+
+<section id="faq"><div class="wrap rise">
+  <p class="eyebrow">FAQ</p>
+  <h2>Questions</h2>
+  <div style="margin-top:8px">
+    <h3 style="font-family:var(--disp);margin:18px 0 4px">Open-source, self-hosted alternative to Stainless?</h3>
+    <p class="lede2">Yes. Inox is a free, MIT-licensed, self-hosted OpenAPI SDK generator. Stainless was acquired and wound down its hosted generator in May 2026; Inox runs the same kind of pipeline on your own machine — air-gapped, zero runtime dependencies, verified on every build.</p>
+    <h3 style="font-family:var(--disp);margin:18px 0 4px">How do I generate an SDK from an OpenAPI spec?</h3>
+    <p class="lede2">Install with <code>npx @crevious/inox</code>, then <code>inox generate --out sdk</code>. Inox auto-derives resources, methods, schemas, pagination, and auth from the spec.</p>
+    <h3 style="font-family:var(--disp);margin:18px 0 4px">Which languages are supported?</h3>
+    <p class="lede2">TypeScript, Python, Go, Java, Ruby, and C# — each with a zero-dependency runtime.</p>
+    <h3 style="font-family:var(--disp);margin:18px 0 4px">Can it turn an API into MCP tools for AI agents?</h3>
+    <p class="lede2"><code>inox products</code> emits a zero-dependency MCP server (protocol 2025-06-18) so any OpenAPI API becomes agent-callable. See the <a href="docs.html#mcp">docs</a>.</p>
   </div>
 </div></section>
 

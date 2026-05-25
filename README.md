@@ -9,6 +9,9 @@ Point Inox at your OpenAPI spec and get idiomatic SDKs in six languages, an MCP
 server, and a CLI — self-hosted, air-gapped, zero runtime dependencies, verified
 on every build.</p>
 
+<p align="center"><sub>The free, open-source, self-hosted <b>OpenAPI SDK generator</b> — an
+alternative to Stainless, Speakeasy, and Fern. TypeScript · Python · Go · Java · Ruby · C#.</sub></p>
+
 <p align="center">
   <a href="https://github.com/CREVIOS/inox/actions/workflows/ci.yml"><img src="https://github.com/CREVIOS/inox/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crevios.github.io/inox/"><img src="https://github.com/CREVIOS/inox/actions/workflows/pages.yml/badge.svg" alt="Deploy"></a>
