@@ -681,11 +681,11 @@ class IrBuilder {
       });
     }
 
-    if (!this.config.client?.auth && !this.spec.components?.securitySchemes) {
+    if (!this.config.client?.auth && !this.spec.components?.securitySchemes && !this.config.client?.auth?.optional) {
       this.diagnostics.push({
         severity: "suggestion",
         code: "sdk.security.auth.missing",
-        message: "No SDK auth configuration or OpenAPI security scheme was found. Configure auth before publishing production SDKs.",
+        message: "No SDK auth configuration or OpenAPI security scheme was found. Configure auth before publishing production SDKs, or set auth.optional to allow unauthenticated requests.",
         location: "client.auth",
       });
     }

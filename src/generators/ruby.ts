@@ -3,6 +3,7 @@ import { pascalCase, quote, snakeCase } from "../utils.js";
 import { renderRubyConformanceTest } from "../conformance.js";
 import { renderReleaseWorkflow } from "../release.js";
 import {
+  bearerHeaderPrefix,
   childResources,
   createTargetWriter,
   emittedResources,
@@ -123,14 +124,55 @@ end
 function renderRubyErrors(mod: string): string {
   return `module ${mod}
   class ApiError < StandardError
-    attr_reader :status_code, :body
+    attr_reader :status_code, :body, :request_id
 
-    def initialize(status_code, body)
-      super("API request failed with status #{status_code}")
+    def initialize(status_code, body, request_id = nil)
+      message = "API request failed with status #{status_code}"
+      message += " (request id: #{request_id})" if request_id
+      super(message)
       @status_code = status_code
       @body = body
+      @request_id = request_id
+    end
+
+    # Returns the per-status error subclass (rescue ApiError to catch all).
+    def self.create(status_code, body, request_id = nil)
+      klass = ERROR_BY_STATUS[status_code]
+      klass ||= InternalServerError if status_code >= 500
+      (klass || ApiError).new(status_code, body, request_id)
     end
   end
+
+  # Parsed data plus the raw HTTP status, headers, and request id (from with_raw_response).
+  class RawResponse
+    attr_reader :data, :status_code, :headers, :request_id
+
+    def initialize(data, status_code, headers, request_id = nil)
+      @data = data
+      @status_code = status_code
+      @headers = headers
+      @request_id = request_id
+    end
+  end
+
+  class BadRequestError < ApiError; end
+  class AuthenticationError < ApiError; end
+  class PermissionDeniedError < ApiError; end
+  class NotFoundError < ApiError; end
+  class ConflictError < ApiError; end
+  class UnprocessableEntityError < ApiError; end
+  class RateLimitError < ApiError; end
+  class InternalServerError < ApiError; end
+
+  ERROR_BY_STATUS = {
+    400 => BadRequestError,
+    401 => AuthenticationError,
+    403 => PermissionDeniedError,
+    404 => NotFoundError,
+    409 => ConflictError,
+    422 => UnprocessableEntityError,
+    429 => RateLimitError,
+  }.freeze
 end
 `;
 }
@@ -145,6 +187,7 @@ function renderRubyClient(ir: ApiIR, mod: string): string {
   const webhookAttr = ir.webhooks ? "    attr_reader :webhooks\n" : "";
   const webhookInit = ir.webhooks ? "      @webhooks = WebhookClient.new(secret: webhook_secret)\n" : "";
   const basic = ir.client.auth?.basic;
+  const authPrefix = bearerHeaderPrefix(ir);
   const initParams = [
     "api_key: nil",
     ...(oauth ? ["client_id: nil", "client_secret: nil"] : []),
@@ -202,7 +245,7 @@ ${oauth.authorization_url ? `
       req["accept"] = "application/json"
       req.body = URI.encode_www_form(form)
       response = http_for(uri).request(req)
-      raise ApiError.new(response.code.to_i, response.body) unless response.code.to_i.between?(200, 299)
+      raise ApiError.create(response.code.to_i, response.body, response["x-request-id"]) unless response.code.to_i.between?(200, 299)
       JSON.parse(response.body)
     end
 
@@ -232,7 +275,7 @@ ${oauth.authorization_url ? `
       req["accept"] = "application/json"
       req.body = URI.encode_www_form(form)
       response = http_for(uri).request(req)
-      raise ApiError.new(response.code.to_i, response.body) unless response.code.to_i.between?(200, 299)
+      raise ApiError.create(response.code.to_i, response.body, response["x-request-id"]) unless response.code.to_i.between?(200, 299)
       payload = JSON.parse(response.body)
       @cached_token = payload["access_token"]
       @token_expiry = Time.now.to_f + (payload.fetch("expires_in", 3600) - 30)
@@ -308,7 +351,7 @@ ${basic ? `      @basic_user = username || ENV[${quote(basic.username_env ?? `${
 ${oauthInit}${webhookInit}${resourceInit}
     end
 
-    def request(method, path, query: nil, body: nil, headers: nil, multipart: false, form_urlencoded: false, text_plain: false, idempotency_key: nil, timeout: nil, max_retries: nil, binary: false)
+    def request(method, path, query: nil, body: nil, headers: nil, multipart: false, form_urlencoded: false, text_plain: false, idempotency_key: nil, timeout: nil, max_retries: nil, binary: false, with_meta: false)
       effective_retries = max_retries || @max_retries
       effective_timeout = timeout || @timeout
       uri = URI("#{@base_url}#{path}")
@@ -356,12 +399,14 @@ ${oauthInit}${webhookInit}${resourceInit}
         @on_response&.call({ method: method.upcase, url: uri.to_s, attempt: attempt, status: status, duration_ms: (Time.now - started) * 1000 })
         if status == 401 && @client_id && @client_secret && !refreshed
           refreshed = true
-          req_headers["authorization"] = "Bearer #{get_token(true)}"
+          req_headers["authorization"] = "${authPrefix}#{get_token(true)}"
           next
         end
         if status >= 200 && status < 300
           return response.body if binary
-          return response.body.nil? || response.body.empty? ? nil : JSON.parse(response.body)
+          parsed_ok = response.body.nil? || response.body.empty? ? nil : JSON.parse(response.body)
+          return RawResponse.new(parsed_ok, status, response, response["x-request-id"]) if with_meta
+          return parsed_ok
         end
         if attempt < effective_retries && should_retry?(response, status)
           sleep(backoff(attempt, response))
@@ -373,7 +418,7 @@ ${oauthInit}${webhookInit}${resourceInit}
         rescue StandardError
           response.body
         end
-        raise ApiError.new(status, parsed)
+        raise ApiError.create(status, parsed, response["x-request-id"])
       end
     end
 
@@ -393,7 +438,7 @@ ${oauthInit}${webhookInit}${resourceInit}
       Enumerator.new do |yielder|
         request_obj = build_net_request(method, uri, data, req_headers)
         http_for(uri).request(request_obj) do |response|
-          raise ApiError.new(response.code.to_i, response.body) unless response.code.to_i.between?(200, 299)
+          raise ApiError.create(response.code.to_i, response.body, response["x-request-id"]) unless response.code.to_i.between?(200, 299)
           buffer = +""
           data_lines = []
           response.read_body do |chunk|
@@ -432,7 +477,7 @@ ${oauthInit}${webhookInit}${resourceInit}
         headers["x-stainless-runtime-version"] = RUBY_VERSION
         headers["x-stainless-timeout"] = @timeout.to_s
       end
-      headers["authorization"] = "Bearer #{bearer}" if bearer && !bearer.to_s.empty?
+      headers["authorization"] = "${authPrefix}#{bearer}" if bearer && !bearer.to_s.empty?
 ${basic ? `      if (bearer.nil? || bearer.to_s.empty?) && @basic_user && !@basic_user.empty? && @basic_pass && !@basic_pass.empty?
         headers["authorization"] = "Basic " + Base64.strict_encode64("#{@basic_user}:#{@basic_pass}")
       end
@@ -689,6 +734,9 @@ function renderRubyResource(ir: ApiIR, mod: string, resource: ResourceIR): strin
   const childAttrs = children.map((child) => `:${child.name}`);
   const childInit = children.map((child) => `      @${child.name} = ${child.class_name}Resource.new(client)`).join("\n");
   const methods = operations.flatMap((operation) => renderRubyOperation(ir, mod, operation)).filter(Boolean).join("\n\n");
+  // with_raw_response: plain (non-streaming) methods returning RawResponse(data, status, headers, request_id).
+  const rawOps = operations.filter((operation) => !operation.websocket && !operation.streaming);
+  const rawMethods = rawOps.map((operation) => renderRubyMethod(ir, mod, operation, "plain", true)).join("\n\n");
 
   return `module ${mod}
   class ${resource.class_name}Resource
@@ -698,7 +746,19 @@ ${childAttrs.length ? `    attr_reader ${childAttrs.join(", ")}\n` : ""}
 ${childInit}
     end
 
+    def with_raw_response
+      ${resource.class_name}RawResource.new(@client)
+    end
+
 ${methods}
+  end
+
+  class ${resource.class_name}RawResource
+    def initialize(client)
+      @client = client
+    end
+
+${rawMethods}
   end
 end
 `;
@@ -722,7 +782,7 @@ function renderRubyOperation(ir: ApiIR, mod: string, operation: OperationIR): st
   return out;
 }
 
-function renderRubyMethod(ir: ApiIR, mod: string, operation: OperationIR, mode: "plain" | "non-stream"): string {
+function renderRubyMethod(ir: ApiIR, mod: string, operation: OperationIR, mode: "plain" | "non-stream", raw = false): string {
   const plan = rbPlan(operation);
   const signature = rbSignature(plan, ["idempotency_key: nil"]);
   const discriminator = mode === "non-stream" ? operation.streaming?.param_discriminator : undefined;
@@ -739,15 +799,17 @@ function renderRubyMethod(ir: ApiIR, mod: string, operation: OperationIR, mode: 
         ? ", text_plain: true"
         : "";
   const binary = operation.binary_response ? ", binary: true" : "";
+  const meta = raw ? ", with_meta: true" : "";
   const callArgs = [
     `query: ${rbQueryHash(plan)}`,
     bodyArg,
     "headers: headers",
     "idempotency_key: idempotency_key",
   ].filter(Boolean).join(", ");
-  const call = `@client.request(${quote(operation.http_method)}, "${plan.pathInterp}", ${callArgs}${multipart}${binary})`;
+  const call = `@client.request(${quote(operation.http_method)}, "${plan.pathInterp}", ${callArgs}${multipart}${binary}${meta})`;
+  const result = raw ? call : rubyWrapResponse(ir, operation, call, mod);
   return `    def ${snakeCase(operation.name)}(${signature})
-      ${rubyWrapResponse(ir, operation, call, mod)}
+      ${result}
     end`;
 }
 

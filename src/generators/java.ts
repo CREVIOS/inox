@@ -3,6 +3,7 @@ import { pascalCase, quote, snakeCase } from "../utils.js";
 import { renderJavaConformanceTest } from "../conformance.js";
 import { renderReleaseWorkflow } from "../release.js";
 import {
+  bearerHeaderPrefix,
   childResources,
   createTargetWriter,
   emittedResources,
@@ -29,6 +30,8 @@ export async function generateJava(ir: ApiIR, rootOutDir: string): Promise<Gener
 
   await writer.write(`${base}/Json.java`, renderJavaJson(pkg));
   await writer.write(`${base}/ApiException.java`, renderJavaException(pkg));
+  await writer.write(`${base}/RawHttp.java`, `package ${pkg};\n\npublic final class RawHttp {\n    public int statusCode;\n    public java.net.http.HttpHeaders headers;\n    public String requestId;\n}\n`);
+  await writer.write(`${base}/RawResponse.java`, `package ${pkg};\n\n// Parsed data plus the raw HTTP status, headers, and request id (from withRawResponse).\npublic final class RawResponse<T> {\n    public final T data;\n    public final int statusCode;\n    public final java.net.http.HttpHeaders headers;\n    public final String requestId;\n    public RawResponse(T data, int statusCode, java.net.http.HttpHeaders headers, String requestId) {\n        this.data = data;\n        this.statusCode = statusCode;\n        this.headers = headers;\n        this.requestId = requestId;\n    }\n}\n`);
   await writer.write(`${base}/ClientOptions.java`, renderJavaClientOptions(ir, pkg));
   await writer.write(`${base}/Client.java`, renderJavaClient(ir, pkg));
   await writer.write(`${base}/Otel.java`, renderJavaOtel(pkg));
@@ -170,16 +173,43 @@ public final class Otel {
 }
 
 function renderJavaException(pkg: string): string {
+  const sub = (name: string) => `    public static final class ${name} extends ApiException {
+        public ${name}(int statusCode, String body, String requestId, java.net.http.HttpHeaders headers) { super(statusCode, body, requestId, headers); }
+    }`;
   return `package ${pkg};
 
-public final class ApiException extends RuntimeException {
+public class ApiException extends RuntimeException {
     public final int statusCode;
     public final String body;
+    public final String requestId;
+    public final java.net.http.HttpHeaders headers;
 
-    public ApiException(int statusCode, String body) {
-        super("API request failed with status " + statusCode);
+    public ApiException(int statusCode, String body) { this(statusCode, body, null, null); }
+
+    public ApiException(int statusCode, String body, String requestId, java.net.http.HttpHeaders headers) {
+        super("API request failed with status " + statusCode + (requestId != null ? " (request id: " + requestId + ")" : ""));
         this.statusCode = statusCode;
         this.body = body;
+        this.requestId = requestId;
+        this.headers = headers;
+    }
+
+    // Per-status subclasses (catch ApiException for all). Usage: catch (ApiException.NotFoundError e).
+${["BadRequestError", "AuthenticationError", "PermissionDeniedError", "NotFoundError", "ConflictError", "UnprocessableEntityError", "RateLimitError", "InternalServerError"].map(sub).join("\n")}
+
+    public static ApiException of(int statusCode, String body, java.net.http.HttpHeaders headers) {
+        String requestId = headers != null ? headers.firstValue("x-request-id").orElse(null) : null;
+        switch (statusCode) {
+            case 400: return new BadRequestError(statusCode, body, requestId, headers);
+            case 401: return new AuthenticationError(statusCode, body, requestId, headers);
+            case 403: return new PermissionDeniedError(statusCode, body, requestId, headers);
+            case 404: return new NotFoundError(statusCode, body, requestId, headers);
+            case 409: return new ConflictError(statusCode, body, requestId, headers);
+            case 422: return new UnprocessableEntityError(statusCode, body, requestId, headers);
+            case 429: return new RateLimitError(statusCode, body, requestId, headers);
+        }
+        if (statusCode >= 500) return new InternalServerError(statusCode, body, requestId, headers);
+        return new ApiException(statusCode, body, requestId, headers);
     }
 }
 `;
@@ -385,7 +415,7 @@ function oauthFlowMethods(oauth: ApiIR["client"]["oauth2"]): string {
             .header("content-type", "application/x-www-form-urlencoded").header("accept", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(String.join("&", parts))).build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw new ApiException(resp.statusCode(), resp.body());
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw ApiException.of(resp.statusCode(), resp.body(), resp.headers());
         Map<String, Object> payload = asMap(Json.parse(resp.body()));
         cachedToken = (String) payload.get("access_token");
         long expires = payload.get("expires_in") instanceof Number ? ((Number) payload.get("expires_in")).longValue() : 3600;
@@ -431,7 +461,7 @@ function oauthFlowMethods(oauth: ApiIR["client"]["oauth2"]): string {
             .header("content-type", "application/x-www-form-urlencoded").header("accept", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(String.join("&", parts))).build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw new ApiException(resp.statusCode(), resp.body());
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw ApiException.of(resp.statusCode(), resp.body(), resp.headers());
         return asMap(Json.parse(resp.body()));
     }
 
@@ -459,6 +489,7 @@ function oauthFlowMethods(oauth: ApiIR["client"]["oauth2"]): string {
 }
 
 function renderJavaClient(ir: ApiIR, pkg: string): string {
+  const authPrefix = bearerHeaderPrefix(ir);
   const resources = topLevelResources(ir, "java");
   const oauth = ir.client.oauth2;
   const imports = resources.map((resource) => `import ${pkg}.resources.${resource.class_name}Resource;`).join("\n");
@@ -553,9 +584,20 @@ ${basicInit}${webhookInit}${init}
             b.header("x-stainless-runtime", "java");
             b.header("x-stainless-retry-count", Integer.toString(attempt));
         }
-        if (bearer != null) b.header("authorization", "Bearer " + bearer);${basic ? `
+        if (bearer != null) b.header("authorization", ${quote(authPrefix)} + bearer);${basic ? `
         else if (basicUser != null && basicPass != null) b.header("authorization", "Basic " + java.util.Base64.getEncoder().encodeToString((basicUser + ":" + basicPass).getBytes(StandardCharsets.UTF_8)));` : ""}
         if (headers != null) for (Map.Entry<String, String> e : headers.entrySet()) b.header(e.getKey(), e.getValue());
+    }
+
+    // GET a (possibly absolute) URL for cursor_url pagination.
+    public Object requestAbsolute(String absUrl) throws Exception {
+        String full = absUrl.startsWith("http") ? absUrl : baseUrl + absUrl;
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(full)).timeout(Duration.ofSeconds(timeoutSeconds));
+        applyHeaders(b, null, resolveBearer(), 0, false);
+        b.GET();
+        HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw ApiException.of(resp.statusCode(), resp.body(), resp.headers());
+        return Json.parse(resp.body());
     }
 
     private String resolveBearer() throws Exception {
@@ -645,7 +687,7 @@ ${oauthFlowMethods(oauth)}
         return out.toByteArray();
     }
 
-    public Object request(String method, String path, Map<String, Object> query, Object body, String encoding, Map<String, String> headers, String idempotencyKey, boolean binary) throws Exception {
+    public Object request(String method, String path, Map<String, Object> query, Object body, String encoding, Map<String, String> headers, String idempotencyKey, boolean binary, RawHttp metaOut) throws Exception {
         String url = baseUrl + path + buildQuery(query);
         String bearer = resolveBearer();
         boolean refreshed = false;
@@ -696,6 +738,7 @@ ${oauthFlowMethods(oauth)}
                 continue;
             }
             if (status >= 200 && status < 300) {
+                if (metaOut != null) { metaOut.statusCode = status; metaOut.headers = resp.headers(); metaOut.requestId = resp.headers().firstValue("x-request-id").orElse(null); }
                 if (binary) return resp.body();
                 return bodyStr.isEmpty() ? null : Json.parse(bodyStr);
             }
@@ -703,7 +746,7 @@ ${oauthFlowMethods(oauth)}
                 Thread.sleep(backoff(attempt));
                 continue;
             }
-            throw new ApiException(status, bodyStr);
+            throw ApiException.of(status, bodyStr, resp.headers());
         }
         throw new ApiException(0, "retry loop exited unexpectedly");
     }
@@ -722,7 +765,7 @@ ${oauthFlowMethods(oauth)}
         applyHeaders(b, headers, bearer, 0, true);
         b.method(method.toUpperCase(), pub);
         HttpResponse<Stream<String>> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofLines());
-        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw new ApiException(resp.statusCode(), "stream error");
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw ApiException.of(resp.statusCode(), "stream error", resp.headers());
         List<Object> events = new ArrayList<>();
         List<String> dataLines = new ArrayList<>();
         for (String line : (Iterable<String>) resp.body()::iterator) {
@@ -992,11 +1035,30 @@ function renderJavaResource(ir: ApiIR, pkg: string, resource: ResourceIR): strin
   const childInit = children.map((child) => `        this.${javaIdent(child.name)} = new ${child.class_name}Resource(client);`).join("\n");
   const methods = operations.flatMap((operation) => renderJavaOperation(ir, operation)).filter(Boolean).join("\n\n");
   const needsQueryHelper = operations.some((operation) => operation.params.some((param) => param.location === "query"));
+  // withRawResponse: plain methods returning RawResponse<T> (data + status + headers + request id).
+  const rawOps = operations.filter((operation) => !operation.streaming && !operation.binary_response && !operation.request?.multipart && operation.response?.kind === "ref");
+  const rawMethods = rawOps.map((operation) => renderJavaRawMethod(ir, operation)).join("\n\n");
+  const rawWrapper = rawOps.length
+    ? `
+    public RawResource withRawResponse() {
+        return new RawResource(client);
+    }
+
+    public static final class RawResource {
+        private final Client client;
+        public RawResource(Client client) { this.client = client; }
+
+${rawMethods}
+    }
+`
+    : "";
 
   return `package ${pkg}.resources;
 
 import ${pkg}.Client;
 import ${pkg}.Json;
+import ${pkg}.RawHttp;
+import ${pkg}.RawResponse;
 import ${pkg}.models.*;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -1017,10 +1079,24 @@ ${needsQueryHelper ? `
         for (int i = 0; i + 1 < kv.length; i += 2) m.put((String) kv[i], kv[i + 1]);
         return m;
     }
-` : ""}
+` : ""}${rawWrapper}
 ${methods}
 }
 `;
+}
+
+function renderJavaRawMethod(ir: ApiIR, operation: OperationIR): string {
+  const plan = javaPlan(operation);
+  const extra = operation.request ? ["Object body"] : [];
+  const params = javaParamList(plan, extra);
+  const bodyArg = operation.request ? "body" : "null";
+  const encoding = operation.request?.form_urlencoded ? "form" : operation.request?.text_plain ? "text" : "json";
+  const modelName = typeById(ir, (operation.response as { id: string }).id)?.name ?? "Object";
+  return `        public RawResponse<${modelName}> ${javaIdent(operation.name)}(${params}) throws Exception {
+            RawHttp meta = new RawHttp();
+            Object _data = client.request(${quote(operation.http_method)}, ${plan.pathExpr}, ${javaQueryMap(plan)}, ${bodyArg}, ${quote(encoding)}, null, null, false, meta);
+            return new RawResponse<>(${modelName}.fromJson(_data), meta.statusCode, meta.headers, meta.requestId);
+        }`;
 }
 
 function renderJavaOperation(ir: ApiIR, operation: OperationIR): string[] {
@@ -1050,7 +1126,7 @@ function renderJavaMethod(ir: ApiIR, operation: OperationIR, mode: "plain" | "no
         ? "text"
         : "json";
   const dep = operation.deprecated ? "    @Deprecated\n" : "";
-  const call = `client.request(${quote(operation.http_method)}, ${plan.pathExpr}, ${javaQueryMap(plan)}, ${bodyArg}, ${quote(encoding)}, null, null, ${operation.binary_response ? "true" : "false"})`;
+  const call = `client.request(${quote(operation.http_method)}, ${plan.pathExpr}, ${javaQueryMap(plan)}, ${bodyArg}, ${quote(encoding)}, null, null, ${operation.binary_response ? "true" : "false"}, null)`;
   if (operation.binary_response) {
     return `${dep}    public byte[] ${javaIdent(operation.name)}(${params}) throws Exception {
         return (byte[]) ${call};
@@ -1095,6 +1171,21 @@ function renderJavaPager(ir: ApiIR, operation: OperationIR): string {
   const respType = javaResponseType(ir, operation);
   const itemType = javaType(ir, shape.itemType);
   const itemsAccessor = javaField(shape.itemsField.name);
+  // cursor_url: follow the absolute next-page URL from the response.
+  if (shape.kind === "cursor_url" && shape.nextUrlField) {
+    const urlAccessor = javaField(shape.nextUrlField.name);
+    return `    public List<${itemType}> ${javaIdent(operation.name)}AutoPaging(${params}) throws Exception {
+        List<${itemType}> all = new ArrayList<>();
+        ${respType} _page = ${javaIdent(operation.name)}(${callArgs});
+        while (true) {
+            if (_page != null && _page.${itemsAccessor}() != null) all.addAll(_page.${itemsAccessor}());
+            String _next = _page == null ? null : _page.${urlAccessor}();
+            if (_next == null || _next.isEmpty()) break;
+            _page = ${respType}.fromJson(client.requestAbsolute(_next));
+        }
+        return all;
+    }`;
+  }
   const advance = javaPagerAdvance(ir, operation, shape);
   const forward = `    public List<${itemType}> ${javaIdent(operation.name)}AutoPaging(${params}) throws Exception {
         List<${itemType}> all = new ArrayList<>();

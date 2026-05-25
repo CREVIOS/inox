@@ -36,6 +36,13 @@ export function typeById(ir: ApiIR, id: string): TypeIR | undefined {
   return ir.types.find((type) => type.id === id);
 }
 
+/** Authorization-header scheme prefix incl. trailing space ("Bearer " by default; "" sends bare token). */
+export function bearerHeaderPrefix(ir: ApiIR): string {
+  const prefix = ir.client.auth?.bearer?.prefix;
+  if (prefix === undefined) return "Bearer ";
+  return prefix === "" ? "" : `${prefix} `;
+}
+
 export function operationsForResource(ir: ApiIR, resource: ResourceIR): OperationIR[] {
   const ids = new Set(resource.operation_ids);
   return ir.operations.filter((operation) => ids.has(operation.id));

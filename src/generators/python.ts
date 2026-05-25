@@ -3,6 +3,7 @@ import { indent, pascalCase, quote, snakeCase } from "../utils.js";
 import { renderPyConformanceTest } from "../conformance.js";
 import { renderReleaseWorkflow } from "../release.js";
 import {
+  bearerHeaderPrefix,
   childResources,
   createTargetWriter,
   emittedResources,
@@ -64,12 +65,22 @@ function renderPythonInit(ir: ApiIR): string {
   const webhookImports = ir.webhooks ? `from ._webhooks import WebhookClient, WebhookVerificationError\n` : "";
   const webhookExports = ir.webhooks ? `, "WebhookClient", "WebhookVerificationError"` : "";
   return `from ._client import ${ir.client.name}, Async${ir.client.name}
-from ._exceptions import ApiError
+from ._exceptions import (
+    ApiError,
+    BadRequestError,
+    AuthenticationError,
+    PermissionDeniedError,
+    NotFoundError,
+    ConflictError,
+    UnprocessableEntityError,
+    RateLimitError,
+    InternalServerError,
+)
 from ._streaming import Stream, AsyncStream
 from ._otel import create_otel_hooks
 ${webhookImports}
 
-__all__ = ["${ir.client.name}", "Async${ir.client.name}", "ApiError", "Stream", "AsyncStream", "create_otel_hooks"${webhookExports}]
+__all__ = ["${ir.client.name}", "Async${ir.client.name}", "ApiError", "BadRequestError", "AuthenticationError", "PermissionDeniedError", "NotFoundError", "ConflictError", "UnprocessableEntityError", "RateLimitError", "InternalServerError", "Stream", "AsyncStream", "create_otel_hooks"${webhookExports}]
 `;
 }
 
@@ -79,6 +90,7 @@ function renderPythonClient(ir: ApiIR): string {
   const webhookAssignment = ir.webhooks ? "        self.webhooks = WebhookClient(secret=webhook_secret)\n" : "";
   const oauth = ir.client.oauth2;
   const basic = ir.client.auth?.basic;
+  const authPrefix = bearerHeaderPrefix(ir);
   const basicUserEnv = basic?.username_env ?? `${ir.client.env_prefix}_USERNAME`;
   const basicPassEnv = basic?.password_env ?? `${ir.client.env_prefix}_PASSWORD`;
   const basicParam = basic ? "\n        username: str | None = None,\n        password: str | None = None," : "";
@@ -161,7 +173,7 @@ function renderPythonClient(ir: ApiIR): string {
                 parsed = json.loads(raw)
             except ValueError:
                 parsed = raw
-            raise ApiError(http_err.code, parsed) from None
+            raise create_api_error(http_err.code, parsed, http_err.headers.get("x-request-id"), http_err.headers) from None
         self._cached_token = payload["access_token"]
         self._token_expiry = time.time() + (payload.get("expires_in", 3600) - 30)
         return payload["access_token"]
@@ -234,7 +246,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Iterator
 
-from ._exceptions import ApiError
+from ._exceptions import ApiError, create_api_error, RawResponse
 from ._streaming import Stream, AsyncStream
 ${webhookImport}
 
@@ -283,7 +295,7 @@ ${oauthInit}${basicInit}${webhookAssignment}
                 "x-stainless-timeout": str(self.timeout),
             })
         if bearer:
-            headers["authorization"] = f"Bearer {bearer}"
+            headers["authorization"] = f"${authPrefix}{bearer}"
         elif self._basic_auth:
             headers["authorization"] = self._basic_auth
         return headers
@@ -304,6 +316,7 @@ ${oauthMethods}${oauthFlowMethods}
         timeout: float | None = None,
         max_retries: int | None = None,
         binary: bool = False,
+        with_meta: bool = False,
     ) -> Any:
         effective_timeout = timeout if timeout is not None else self.timeout
         effective_retries = max_retries if max_retries is not None else self.max_retries
@@ -350,7 +363,10 @@ ${oauthMethods}${oauthFlowMethods}
                     raw = response.read().decode("utf-8")
                     if self._on_response:
                         self._on_response({**info, "status": response.status, "duration_ms": (time.time() - started) * 1000})
-                    return json.loads(raw) if raw else None
+                    parsed_ok = json.loads(raw) if raw else None
+                    if with_meta:
+                        return RawResponse(parsed_ok, response.status, dict(response.headers), response.headers.get("x-request-id"))
+                    return parsed_ok
             except urllib.error.HTTPError as exc:
                 if self._on_response:
                     self._on_response({**info, "status": exc.code, "duration_ms": (time.time() - started) * 1000})
@@ -361,12 +377,12 @@ ${oauthMethods}${oauthFlowMethods}
                     parsed = raw
                 if exc.code == 401 and self.client_id and self.client_secret and not refreshed:
                     refreshed = True
-                    request_headers["authorization"] = f"Bearer {self._get_token(force=True)}"
+                    request_headers["authorization"] = f"${authPrefix}{self._get_token(force=True)}"
                     continue
                 if attempt < effective_retries and _should_retry(exc, self.retry_statuses):
                     time.sleep(_computed_backoff_seconds(attempt, exc.headers.get("retry-after"), exc.headers.get("retry-after-ms")))
                     continue
-                raise ApiError(exc.code, parsed) from exc
+                raise create_api_error(exc.code, parsed, exc.headers.get("x-request-id"), exc.headers) from exc
             except urllib.error.URLError as exc:
                 if self._on_error:
                     self._on_error({**info, "error": exc})
@@ -413,7 +429,7 @@ ${oauthMethods}${oauthFlowMethods}
                 parsed: Any = json.loads(raw) if raw else None
             except json.JSONDecodeError:
                 parsed = raw
-            raise ApiError(exc.code, parsed) from exc
+            raise create_api_error(exc.code, parsed, exc.headers.get("x-request-id"), exc.headers) from exc
         return _iter_stream(response, sse, done_sentinel)
 
     async def async_request(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -670,10 +686,75 @@ from typing import Any
 
 
 class ApiError(Exception):
-    def __init__(self, status_code: int, body: Any) -> None:
-        super().__init__(f"API request failed with status {status_code}")
+    def __init__(self, status_code: int, body: Any, request_id: str | None = None, headers: Any = None) -> None:
+        message = f"API request failed with status {status_code}"
+        if request_id:
+            message += f" (request id: {request_id})"
+        super().__init__(message)
         self.status_code = status_code
         self.body = body
+        self.request_id = request_id
+        self.headers = headers
+
+
+class BadRequestError(ApiError):
+    pass
+
+
+class AuthenticationError(ApiError):
+    pass
+
+
+class PermissionDeniedError(ApiError):
+    pass
+
+
+class NotFoundError(ApiError):
+    pass
+
+
+class ConflictError(ApiError):
+    pass
+
+
+class UnprocessableEntityError(ApiError):
+    pass
+
+
+class RateLimitError(ApiError):
+    pass
+
+
+class InternalServerError(ApiError):
+    pass
+
+
+_ERROR_BY_STATUS = {
+    400: BadRequestError,
+    401: AuthenticationError,
+    403: PermissionDeniedError,
+    404: NotFoundError,
+    409: ConflictError,
+    422: UnprocessableEntityError,
+    429: RateLimitError,
+}
+
+
+def create_api_error(status_code: int, body: Any, request_id: str | None = None, headers: Any = None) -> ApiError:
+    cls = _ERROR_BY_STATUS.get(status_code)
+    if cls is None and status_code >= 500:
+        cls = InternalServerError
+    return (cls or ApiError)(status_code, body, request_id, headers)
+
+
+class RawResponse:
+    """Parsed data plus the raw HTTP status, headers, and request id (from with_raw_response)."""
+
+    def __init__(self, data: Any, status_code: int, headers: Any, request_id: str | None = None) -> None:
+        self.data = data
+        self.status_code = status_code
+        self.headers = headers
+        self.request_id = request_id
 `;
 }
 
@@ -997,9 +1078,25 @@ function renderPythonResource(ir: ApiIR, resource: ResourceIR): string {
   const childInit = children.map((child) => `        self.${child.name} = ${child.class_name}Resource(client)`).join("\n");
   const asyncChildInit = children.map((child) => `        self.${child.name} = Async${child.class_name}Resource(client)`).join("\n");
 
+  // with_raw_response: plain (non-streaming) methods returning RawResponse(data, status, headers, request_id).
+  const rawOps = operations.filter((operation) => !operation.websocket && !operation.streaming);
+  const rawMethods = rawOps.map((operation) => renderPythonMethod(ir, operation, false, "plain", true)).join("\n\n");
+  const rawAsyncMethods = rawOps.map((operation) => renderPythonMethod(ir, operation, true, "plain", true)).join("\n\n");
+  const rawProp = `
+    @property
+    def with_raw_response(self) -> "_Raw${resource.class_name}Resource":
+        return _Raw${resource.class_name}Resource(self._client)
+`;
+  const rawAsyncProp = `
+    @property
+    def with_raw_response(self) -> "_AsyncRaw${resource.class_name}Resource":
+        return _AsyncRaw${resource.class_name}Resource(self._client)
+`;
+
   return `from __future__ import annotations
 
 from typing import Any, AsyncIterator, Iterator
+from .._exceptions import RawResponse
 ${importLines.join("\n")}
 ${streamImport}${childImports}${childImports ? "\n" : ""}
 
@@ -1007,16 +1104,30 @@ class ${resource.class_name}Resource:
     def __init__(self, client: Any) -> None:
         self._client = client
 ${childInit}
-
+${rawOps.length ? rawProp : ""}
 ${methods ? indent(methods, 4) : "    pass"}
+
+
+class _Raw${resource.class_name}Resource:
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+${rawMethods ? indent(rawMethods, 4) : "    pass"}
 
 
 class Async${resource.class_name}Resource:
     def __init__(self, client: Any) -> None:
         self._client = client
 ${asyncChildInit}
-
+${rawOps.length ? rawAsyncProp : ""}
 ${asyncMethods ? indent(asyncMethods, 4) : "    pass"}
+
+
+class _AsyncRaw${resource.class_name}Resource:
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+${rawAsyncMethods ? indent(rawAsyncMethods, 4) : "    pass"}
 `;
 }
 
@@ -1080,7 +1191,7 @@ ${plan.queryParams.map((param) => `            ${quote(param.wire)}: ${param.nam
     : "None";
 }
 
-function renderPythonMethod(ir: ApiIR, operation: OperationIR, asyncMethod: boolean, mode: "plain" | "non-stream"): string {
+function renderPythonMethod(ir: ApiIR, operation: OperationIR, asyncMethod: boolean, mode: "plain" | "non-stream", raw = false): string {
   const plan = pyParamPlan(ir, operation);
   const response = operation.response ? pythonType(ir, operation.response) : "Any";
   const methodPrefix = asyncMethod ? "async def" : "def";
@@ -1100,9 +1211,10 @@ function renderPythonMethod(ir: ApiIR, operation: OperationIR, asyncMethod: bool
         ? ", text_plain=True"
         : "";
   const binary = operation.binary_response ? ", binary=True" : "";
-  const returnType = operation.binary_response ? "bytes" : response;
+  const returnType = raw ? "RawResponse" : operation.binary_response ? "bytes" : response;
+  const meta = raw ? ", with_meta=True" : "";
   return `${methodPrefix} ${snakeCase(operation.name)}(${plan.signature.join(", ")}) -> ${returnType}:
-    ${returnPrefix} ${requestCall}(${quote(operation.http_method)}, ${plan.pathExpr}, query=${pyQueryDict(plan)}, body=${bodyExpr}, headers=headers, idempotency_key=idempotency_key${multipart}${binary})`;
+    ${returnPrefix} ${requestCall}(${quote(operation.http_method)}, ${plan.pathExpr}, query=${pyQueryDict(plan)}, body=${bodyExpr}, headers=headers, idempotency_key=idempotency_key${multipart}${binary}${meta})`;
 }
 
 function renderPythonStreamingMethod(ir: ApiIR, operation: OperationIR, asyncMethod: boolean): string {

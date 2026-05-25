@@ -13,6 +13,7 @@ import { camelCase, indent, pascalCase, quote, snakeCase } from "../utils.js";
 import { renderTsConformanceTest } from "../conformance.js";
 import { renderReleaseWorkflow } from "../release.js";
 import {
+  bearerHeaderPrefix,
   childResources,
   createTargetWriter,
   emittedResources,
@@ -481,6 +482,7 @@ ${fields.join("\n")}
     this._client = new ApiClient({
       baseUrl,
       apiKey: options.apiKey ?? process.env.${ir.client.env_prefix}_API_KEY,${basicOption}
+      authPrefix: ${quote(bearerHeaderPrefix(ir))},
       timeoutMs: options.timeoutMs ?? ${ir.client.timeout_ms},
       maxRetries: options.maxRetries ?? ${ir.client.retry_policy.max_retries},
       retryStatuses: options.retryStatuses ?? ${JSON.stringify(ir.client.retry_policy.retry_statuses)},
@@ -624,12 +626,42 @@ export interface StreamOptions extends RequestOptions {
 export class ApiError extends Error {
   readonly status: number;
   readonly body: unknown;
+  /** Value of the response's x-request-id header, for correlating with server logs. */
+  readonly requestId?: string;
+  readonly headers?: Headers;
 
-  constructor(status: number, body: unknown) {
-    super(\`API request failed with status \${status}\`);
+  constructor(status: number, body: unknown, requestId?: string, headers?: Headers) {
+    super(\`API request failed with status \${status}\${requestId ? \` (request id: \${requestId})\` : ""}\`);
     this.status = status;
     this.body = body;
+    this.requestId = requestId;
+    this.headers = headers;
+    this.name = new.target.name;
   }
+}
+
+// Per-status error subclasses so callers can \`catch\`/\`instanceof\` specific failures.
+export class BadRequestError extends ApiError {}          // 400
+export class AuthenticationError extends ApiError {}      // 401
+export class PermissionDeniedError extends ApiError {}    // 403
+export class NotFoundError extends ApiError {}            // 404
+export class ConflictError extends ApiError {}            // 409
+export class UnprocessableEntityError extends ApiError {} // 422
+export class RateLimitError extends ApiError {}           // 429
+export class InternalServerError extends ApiError {}      // >= 500
+
+export function createApiError(status: number, body: unknown, requestId?: string, headers?: Headers): ApiError {
+  switch (status) {
+    case 400: return new BadRequestError(status, body, requestId, headers);
+    case 401: return new AuthenticationError(status, body, requestId, headers);
+    case 403: return new PermissionDeniedError(status, body, requestId, headers);
+    case 404: return new NotFoundError(status, body, requestId, headers);
+    case 409: return new ConflictError(status, body, requestId, headers);
+    case 422: return new UnprocessableEntityError(status, body, requestId, headers);
+    case 429: return new RateLimitError(status, body, requestId, headers);
+  }
+  if (status >= 500) return new InternalServerError(status, body, requestId, headers);
+  return new ApiError(status, body, requestId, headers);
 }
 
 /** Async-iterable wrapper over an SSE or JSONL response body. */
@@ -771,16 +803,18 @@ export class ApiClient {
   private readonly idempotencyHeader?: string | null;
   private readonly oauth2?: OAuth2Config;
   private readonly basicAuth?: string;
+  private readonly authPrefix: string;
   private readonly hooks?: ClientHooks;
   private readonly validateResponses: boolean;
   private readonly validate?: (value: unknown, typeName: string) => void;
   private cachedToken?: string;
   private tokenExpiresAt = 0;
 
-  constructor(options: Required<Pick<ClientOptions, "baseUrl" | "timeoutMs" | "maxRetries" | "retryStatuses">> & Pick<ClientOptions, "apiKey" | "packageVersion" | "omitStainlessHeaders" | "idempotencyHeader" | "hooks"> & { oauth2?: OAuth2Config; basicAuth?: string; validateResponses?: boolean; validate?: (value: unknown, typeName: string) => void }) {
+  constructor(options: Required<Pick<ClientOptions, "baseUrl" | "timeoutMs" | "maxRetries" | "retryStatuses">> & Pick<ClientOptions, "apiKey" | "packageVersion" | "omitStainlessHeaders" | "idempotencyHeader" | "hooks"> & { oauth2?: OAuth2Config; basicAuth?: string; authPrefix?: string; validateResponses?: boolean; validate?: (value: unknown, typeName: string) => void }) {
     this.baseUrl = options.baseUrl.replace(/\\/$/, "");
     this.apiKey = options.apiKey;
     this.basicAuth = options.basicAuth;
+    this.authPrefix = options.authPrefix ?? "Bearer ";
     this.timeoutMs = options.timeoutMs;
     this.maxRetries = options.maxRetries;
     this.retryStatuses = new Set(options.retryStatuses);
@@ -808,7 +842,7 @@ export class ApiClient {
       params.set("client_secret", this.oauth2.clientSecret);
     }
     const response = await fetch(tokenUrl, { method: "POST", headers, body: params.toString() });
-    if (!response.ok) throw new ApiError(response.status, await response.text());
+    if (!response.ok) throw createApiError(response.status, await response.text(), response.headers.get("x-request-id") ?? undefined, response.headers);
     const data = (await response.json()) as { access_token: string; expires_in?: number };
     this.cachedToken = data.access_token;
     this.tokenExpiresAt = Date.now() + ((data.expires_in ?? 3600) - 30) * 1000;
@@ -847,7 +881,7 @@ export class ApiClient {
     if (this.oauth2.clientId) params.set("client_id", this.oauth2.clientId);
     if (this.oauth2.scopes.length) params.set("scope", this.oauth2.scopes.join(" "));
     const response = await fetch(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body: params.toString() });
-    if (!response.ok) throw new ApiError(response.status, await response.text());
+    if (!response.ok) throw createApiError(response.status, await response.text(), response.headers.get("x-request-id") ?? undefined, response.headers);
     return (await response.json()) as DeviceCodeResponse;
   }
 
@@ -877,7 +911,7 @@ export class ApiClient {
     const response = await fetch(tokenUrl, { method: "POST", headers, body: params.toString() });
     if (!response.ok) {
       const text = await response.text();
-      throw new ApiError(response.status, text ? safeJson(text) : undefined);
+      throw createApiError(response.status, text ? safeJson(text) : undefined, response.headers.get("x-request-id") ?? undefined, response.headers);
     }
     const data = (await response.json()) as { access_token: string; expires_in?: number };
     this.cachedToken = data.access_token;
@@ -911,7 +945,7 @@ export class ApiClient {
       headers["x-stainless-timeout"] = String((options.timeoutMs ?? this.timeoutMs) / 1000);
       headers["x-stainless-retry-count"] = String(attempt);
     }
-    if (bearer) headers.authorization = \`Bearer \${bearer}\`;
+    if (bearer) headers.authorization = this.authPrefix + bearer;
     else if (this.basicAuth) headers.authorization = this.basicAuth;
 
     let body: BodyInit | undefined;
@@ -984,7 +1018,7 @@ export class ApiClient {
           await sleep(backoffMs(attempt, response.headers.get("retry-after"), response.headers.get("retry-after-ms")));
           continue;
         }
-        throw new ApiError(response.status, parsed);
+        throw createApiError(response.status, parsed, response.headers.get("x-request-id") ?? undefined, response.headers);
       } catch (error) {
         clearTimeout(timeout);
         lastError = error;
@@ -1006,7 +1040,7 @@ export class ApiClient {
     const response = await fetch(url, { method: method.toUpperCase(), headers, body, signal: options.signal ?? controller.signal });
     if (!response.ok) {
       const text = await response.text();
-      throw new ApiError(response.status, text ? safeJson(text) : undefined);
+      throw createApiError(response.status, text ? safeJson(text) : undefined, response.headers.get("x-request-id") ?? undefined, response.headers);
     }
     if (!response.body) throw new ApiError(response.status, "missing response stream body");
     return new Stream<T>(response.body, options.sse ?? true, options.doneSentinel, options.responseType);

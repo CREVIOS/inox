@@ -6,6 +6,7 @@ import { pascalCase, quote, snakeCase } from "../utils.js";
 import { renderGoConformanceTest } from "../conformance.js";
 import { renderReleaseWorkflow } from "../release.js";
 import {
+  bearerHeaderPrefix,
   childResources,
   createTargetWriter,
   emittedResources,
@@ -130,7 +131,7 @@ func (client *Client) oauthTokenRequest(ctx context.Context, form url.Values) (s
 \tbody, _ := io.ReadAll(response.Body)
 \tresponse.Body.Close()
 \tif response.StatusCode < 200 || response.StatusCode >= 300 {
-\t\treturn "", &APIError{StatusCode: response.StatusCode, Body: body}
+\t\treturn "", newAPIError(response.StatusCode, body, response.Header)
 \t}
 \tvar payload struct {
 \t\tAccessToken string \`json:"access_token"\`
@@ -226,7 +227,7 @@ func (client *Client) RequestDeviceCode(ctx context.Context) (*DeviceCode, error
 \tbody, _ := io.ReadAll(response.Body)
 \tresponse.Body.Close()
 \tif response.StatusCode < 200 || response.StatusCode >= 300 {
-\t\treturn nil, &APIError{StatusCode: response.StatusCode, Body: body}
+\t\treturn nil, newAPIError(response.StatusCode, body, response.Header)
 \t}
 \tvar out DeviceCode
 \tif err := json.Unmarshal(body, &out); err != nil {
@@ -291,6 +292,7 @@ func WithWebhookSecret(secret string) ClientOption {
 }
 `
     : "";
+  const authPrefix = bearerHeaderPrefix(ir);
   const basic = ir.client.auth?.basic;
   const basicImport = basic ? '\t"encoding/base64"\n' : "";
   const basicFields = basic ? "\n\tbasicUser string\n\tbasicPass string" : "";
@@ -535,7 +537,7 @@ func (client *Client) accessToken(ctx context.Context, force bool) (string, erro
 \tbody, _ := io.ReadAll(response.Body)
 \tresponse.Body.Close()
 \tif response.StatusCode < 200 || response.StatusCode >= 300 {
-\t\treturn "", &APIError{StatusCode: response.StatusCode, Body: body}
+\t\treturn "", newAPIError(response.StatusCode, body, response.Header)
 \t}
 \tvar payload struct {
 \t\tAccessToken string \`json:"access_token"\`
@@ -560,12 +562,12 @@ func (client *Client) authorize(ctx context.Context, request *http.Request) erro
 \t\t\treturn err
 \t\t}
 \t\tif token != "" {
-\t\t\trequest.Header.Set("Authorization", "Bearer "+token)
+\t\t\trequest.Header.Set("Authorization", ${quote(authPrefix)}+token)
 \t\t}
 \t\treturn nil
 \t}
 \tif client.apiKey != "" {
-\t\trequest.Header.Set("Authorization", "Bearer "+client.apiKey)
+\t\trequest.Header.Set("Authorization", ${quote(authPrefix)}+client.apiKey)
 \t\treturn nil
 \t}${basic ? `
 \tif client.basicUser != "" && client.basicPass != "" {
@@ -574,11 +576,60 @@ func (client *Client) authorize(ctx context.Context, request *http.Request) erro
 \treturn nil
 }
 
-func (client *Client) do(ctx context.Context, method string, path string, query url.Values, body any, out any) error {
-\treturn client.doEncoded(ctx, method, path, query, body, out, "json")
+// RawResponse carries parsed data plus the raw HTTP status, headers, and request id.
+type RawResponse[T any] struct {
+\tData       T
+\tStatusCode int
+\tHeaders    http.Header
+\tRequestID  string
 }
 
-func (client *Client) doEncoded(ctx context.Context, method string, path string, query url.Values, body any, out any, encoding string) error {
+type rawMeta struct {
+\tStatusCode int
+\tHeaders    http.Header
+\tRequestID  string
+}
+
+func (client *Client) do(ctx context.Context, method string, path string, query url.Values, body any, out any) error {
+\treturn client.doEncoded(ctx, method, path, query, body, out, "json", nil)
+}
+
+func (client *Client) doRaw(ctx context.Context, method string, path string, query url.Values, body any, out any, encoding string) (rawMeta, error) {
+\tvar meta rawMeta
+\terr := client.doEncoded(ctx, method, path, query, body, out, encoding, &meta)
+\treturn meta, err
+}
+
+// doAbsolute GETs a (possibly absolute) URL for cursor_url pagination.
+func (client *Client) doAbsolute(ctx context.Context, absURL string, out any) error {
+\trequestURL := absURL
+\tif !strings.HasPrefix(absURL, "http") {
+\t\trequestURL = client.baseURL + absURL
+\t}
+\trequest, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
+\tif err != nil {
+\t\treturn err
+\t}
+\tclient.applyDefaultHeaders(request, 0)
+\tif err := client.authorize(ctx, request); err != nil {
+\t\treturn err
+\t}
+\tresponse, err := client.httpClient.Do(request)
+\tif err != nil {
+\t\treturn err
+\t}
+\tbody, _ := io.ReadAll(response.Body)
+\tresponse.Body.Close()
+\tif response.StatusCode < 200 || response.StatusCode >= 300 {
+\t\treturn newAPIError(response.StatusCode, body, response.Header)
+\t}
+\tif out != nil {
+\t\treturn json.Unmarshal(body, out)
+\t}
+\treturn nil
+}
+
+func (client *Client) doEncoded(ctx context.Context, method string, path string, query url.Values, body any, out any, encoding string, meta *rawMeta) error {
 \tvar payload []byte
 \tcontentType := "application/json"
 \tif body != nil {
@@ -660,7 +711,12 @@ func (client *Client) doEncoded(ctx context.Context, method string, path string,
 \t\t\t\ttime.Sleep(retryDelay(attempt, response))
 \t\t\t\tcontinue
 \t\t\t}
-\t\t\treturn &APIError{StatusCode: response.StatusCode, Body: responseBody}
+\t\t\treturn newAPIError(response.StatusCode, responseBody, response.Header)
+\t\t}
+\t\tif meta != nil {
+\t\t\tmeta.StatusCode = response.StatusCode
+\t\t\tmeta.Headers = response.Header
+\t\t\tmeta.RequestID = response.Header.Get("x-request-id")
 \t\t}
 \t\tif raw, ok := out.(*[]byte); ok {
 \t\t\t*raw = responseBody
@@ -740,7 +796,7 @@ func (client *Client) doMultipart(ctx context.Context, method string, path strin
 \t\treturn readErr
 \t}
 \tif response.StatusCode < 200 || response.StatusCode >= 300 {
-\t\treturn &APIError{StatusCode: response.StatusCode, Body: responseBody}
+\t\treturn newAPIError(response.StatusCode, responseBody, response.Header)
 \t}
 \tif out == nil || len(responseBody) == 0 {
 \t\treturn nil
@@ -780,7 +836,7 @@ func (client *Client) doStream(ctx context.Context, method string, path string, 
 \tif response.StatusCode < 200 || response.StatusCode >= 300 {
 \t\tresponseBody, _ := io.ReadAll(response.Body)
 \t\tresponse.Body.Close()
-\t\treturn nil, &APIError{StatusCode: response.StatusCode, Body: responseBody}
+\t\treturn nil, newAPIError(response.StatusCode, responseBody, response.Header)
 \t}
 \treturn response, nil
 }
@@ -788,10 +844,52 @@ func (client *Client) doStream(ctx context.Context, method string, path string, 
 type APIError struct {
 \tStatusCode int
 \tBody       []byte
+\tRequestID  string
+\tHeaders    http.Header
 }
 
 func (err *APIError) Error() string {
+\tif err.RequestID != "" {
+\t\treturn fmt.Sprintf("API request failed with status %d (request id: %s)", err.StatusCode, err.RequestID)
+\t}
 \treturn fmt.Sprintf("API request failed with status %d", err.StatusCode)
+}
+
+// Per-status error types. Use errors.As to match, e.g. var e *NotFoundError; errors.As(err, &e).
+type BadRequestError struct{ *APIError }          // 400
+type AuthenticationError struct{ *APIError }      // 401
+type PermissionDeniedError struct{ *APIError }    // 403
+type NotFoundError struct{ *APIError }            // 404
+type ConflictError struct{ *APIError }            // 409
+type UnprocessableEntityError struct{ *APIError } // 422
+type RateLimitError struct{ *APIError }           // 429
+type InternalServerError struct{ *APIError }      // >= 500
+
+func newAPIError(status int, body []byte, headers http.Header) error {
+\tbase := &APIError{StatusCode: status, Body: body, Headers: headers}
+\tif headers != nil {
+\t\tbase.RequestID = headers.Get("x-request-id")
+\t}
+\tswitch status {
+\tcase 400:
+\t\treturn &BadRequestError{base}
+\tcase 401:
+\t\treturn &AuthenticationError{base}
+\tcase 403:
+\t\treturn &PermissionDeniedError{base}
+\tcase 404:
+\t\treturn &NotFoundError{base}
+\tcase 409:
+\t\treturn &ConflictError{base}
+\tcase 422:
+\t\treturn &UnprocessableEntityError{base}
+\tcase 429:
+\t\treturn &RateLimitError{base}
+\t}
+\tif status >= 500 {
+\t\treturn &InternalServerError{base}
+\t}
+\treturn base
 }
 
 // Stream is a typed iterator over a server-sent-event or JSONL response body.
@@ -1258,7 +1356,51 @@ ${childInit}
 ${params}
 
 ${methods}
+${renderGoRawService(ir, resource, operations)}`;
+}
+
+// WithRawResponse exposes plain methods returning *RawResponse[T] (data + status + headers + request id).
+function renderGoRawService(ir: ApiIR, resource: ResourceIR, operations: OperationIR[]): string {
+  const rawOps = operations.filter(
+    (operation) => !operation.websocket && !operation.streaming && !operation.binary_response && !operation.request?.multipart && operation.response,
+  );
+  if (rawOps.length === 0) return "";
+  const methods = rawOps.map((operation) => renderGoRawMethod(ir, resource, operation)).join("\n\n");
+  return `
+func (service *${resource.class_name}Service) WithRawResponse() *${resource.class_name}RawService {
+\treturn &${resource.class_name}RawService{client: service.client}
+}
+
+type ${resource.class_name}RawService struct {
+\tclient *Client
+}
+
+${methods}
 `;
+}
+
+function renderGoRawMethod(ir: ApiIR, resource: ResourceIR, operation: OperationIR): string {
+  const paramsName = operationTypeName(resource, operation, "Params");
+  const hasParams = operation.params.length > 0 || Boolean(operation.request);
+  const itemType = trimPointer(goType(ir, operation.response!, false));
+  const paramsArg = hasParams ? `, params ${paramsName}` : "";
+  const path = renderGoPath(operation);
+  const queryLines = operation.params
+    .filter((param) => param.location === "query")
+    .map((param) => renderGoQueryParam(ir, param))
+    .join("\n");
+  const body = operation.request ? "params.Body" : "nil";
+  const encoding = operation.request?.form_urlencoded ? "form" : operation.request?.text_plain ? "text" : "json";
+  return `func (service *${resource.class_name}RawService) ${pascalCase(operation.name)}(ctx context.Context${paramsArg}) (*RawResponse[${itemType}], error) {
+\tpath := ${path}
+\tquery := url.Values{}
+${queryLines ? `${queryLines}\n` : ""}\tvar out ${itemType}
+\tmeta, err := service.client.doRaw(ctx, ${quote(operation.http_method)}, path, query, ${body}, &out, ${quote(encoding)})
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\treturn &RawResponse[${itemType}]{Data: out, StatusCode: meta.StatusCode, Headers: meta.Headers, RequestID: meta.RequestID}, nil
+}`;
 }
 
 function renderGoParams(ir: ApiIR, resource: ResourceIR, operation: OperationIR): string {
@@ -1341,7 +1483,7 @@ ${queryLines ? `${queryLines}\n` : ""}${discriminatorLines}\tvar out []byte
   const encoding = operation.request?.form_urlencoded ? "form" : operation.request?.text_plain ? "text" : undefined;
   const doExpr = (target: string) =>
     encoding
-      ? `service.client.doEncoded(ctx, ${quote(operation.http_method)}, path, query, ${body}, ${target}, ${quote(encoding)})`
+      ? `service.client.doEncoded(ctx, ${quote(operation.http_method)}, path, query, ${body}, ${target}, ${quote(encoding)}, nil)`
       : `service.client.do(ctx, ${quote(operation.http_method)}, path, query, ${body}, ${target})`;
   const decode = responseType
     ? `\tvar out ${trimPointer(responseType)}
@@ -1405,6 +1547,74 @@ function renderGoPager(ir: ApiIR, resource: ResourceIR, operation: OperationIR):
   const paramsName = operationTypeName(resource, operation, "Params");
   const itemType = goType(ir, shape.itemType, false);
   const itemsField = pascalCase(shape.itemsField.name);
+  // cursor_url: follow the absolute next-page URL from the response instead of mutating params.
+  if (shape.kind === "cursor_url" && shape.nextUrlField) {
+    const respType = operation.response ? trimPointer(goType(ir, operation.response, false)) : "any";
+    const urlField = pascalCase(shape.nextUrlField.name);
+    const urlExpr = shape.nextUrlField.type.kind === "primitive" && shape.nextUrlField.nullable
+      ? `if page.${urlField} == nil || *page.${urlField} == "" {\n\t\t\tpager.done = true\n\t\t} else {\n\t\t\tpager.nextURL = *page.${urlField}\n\t\t}`
+      : `if page.${urlField} == "" {\n\t\t\tpager.done = true\n\t\t} else {\n\t\t\tpager.nextURL = page.${urlField}\n\t\t}`;
+    return `func (service *${resource.class_name}Service) ${pascalCase(operation.name)}AutoPaging(ctx context.Context, params ${paramsName}) *${pagerName} {
+\treturn &${pagerName}{service: service, ctx: ctx, params: params, index: -1, first: true}
+}
+
+type ${pagerName} struct {
+\tservice *${resource.class_name}Service
+\tctx     context.Context
+\tparams  ${paramsName}
+\titems   []${itemType}
+\tindex   int
+\tdone    bool
+\tfirst   bool
+\tnextURL string
+\tcurrent ${itemType}
+\terr     error
+}
+
+func (pager *${pagerName}) Next() bool {
+\tif pager.err != nil {
+\t\treturn false
+\t}
+\tfor {
+\t\tpager.index++
+\t\tif pager.index < len(pager.items) {
+\t\t\tpager.current = pager.items[pager.index]
+\t\t\treturn true
+\t\t}
+\t\tif pager.done {
+\t\t\treturn false
+\t\t}
+\t\tvar page *${respType}
+\t\tif pager.first {
+\t\t\tpg, err := pager.service.${pascalCase(operation.name)}(pager.ctx, pager.params)
+\t\t\tif err != nil {
+\t\t\t\tpager.err = err
+\t\t\t\treturn false
+\t\t\t}
+\t\t\tpage = pg
+\t\t\tpager.first = false
+\t\t} else {
+\t\t\tvar pg ${respType}
+\t\t\tif err := pager.service.client.doAbsolute(pager.ctx, pager.nextURL, &pg); err != nil {
+\t\t\t\tpager.err = err
+\t\t\t\treturn false
+\t\t\t}
+\t\t\tpage = &pg
+\t\t}
+\t\tpager.items = page.${itemsField}
+\t\tpager.index = -1
+\t\t${urlExpr}
+\t}
+}
+
+func (pager *${pagerName}) Current() ${itemType} {
+\treturn pager.current
+}
+
+func (pager *${pagerName}) Err() error {
+\treturn pager.err
+}`;
+  }
   const advance = goPagerAdvance(shape);
   return `func (service *${resource.class_name}Service) ${pascalCase(operation.name)}AutoPaging(ctx context.Context, params ${paramsName}) *${pagerName} {
 \treturn &${pagerName}{service: service, ctx: ctx, params: params, index: -1}

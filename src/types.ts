@@ -103,9 +103,13 @@ export interface TargetConfig {
 }
 
 export interface AuthConfig {
+  /** When true, requests succeed without credentials (suppresses the missing-auth diagnostic). */
+  optional?: boolean;
   bearer?: {
     env?: string;
     security_scheme?: string;
+    /** Authorization header scheme prefix; default "Bearer". Empty string sends the bare token. */
+    prefix?: string;
   };
   basic?: {
     username_env?: string;

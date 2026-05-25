@@ -190,6 +190,25 @@ async function main(): Promise<void> {
     assert.match(proto, /export function encodeMessage/, "protobuf encoder");
     assert.match(proto, /export function frame/, "gRPC-web framing");
     assert.match(grpcweb, /application\/grpc-web\+proto/, "gRPC-web transport");
+
+    // Parity: typed error hierarchy in every language.
+    assert.match(await read(dir, "typescript/src/core.ts"), /class NotFoundError extends ApiError/, "TS NotFoundError");
+    assert.match(await read(dir, "python/src/feat_sdk/_exceptions.py"), /class RateLimitError\(ApiError\)/, "Python RateLimitError");
+    assert.match(await read(dir, "go/client.go"), /type NotFoundError struct/, "Go NotFoundError");
+    assert.match(await read(dir, "ruby/lib/feat/errors.rb"), /class NotFoundError < ApiError/, "Ruby NotFoundError");
+    assert.match(await read(dir, "java/src/main/java/com/feat/ApiException.java"), /class NotFoundError extends ApiException/, "Java NotFoundError");
+    assert.match(await read(dir, "csharp/ApiException.cs"), /class NotFoundError : ApiException/, "C# NotFoundError");
+
+    // Parity: request-id extraction.
+    assert.match(await read(dir, "go/client.go"), /x-request-id/, "Go request-id");
+    assert.match(await read(dir, "python/src/feat_sdk/_client.py"), /x-request-id/, "Python request-id");
+
+    // Parity: raw response access in every non-TS language.
+    assert.match(await read(dir, "python/src/feat_sdk/resources/charges.py"), /with_raw_response/, "Python with_raw_response");
+    assert.match(await read(dir, "ruby/lib/feat/resources/charges.rb"), /with_raw_response/, "Ruby with_raw_response");
+    assert.match(await read(dir, "go/resource_charges.go"), /WithRawResponse/, "Go WithRawResponse");
+    assert.match(await read(dir, "java/src/main/java/com/feat/resources/ChargesResource.java"), /withRawResponse/, "Java withRawResponse");
+    assert.match(await read(dir, "csharp/Resources/ChargesResource.cs"), /WithRawResponse/, "C# WithRawResponse");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

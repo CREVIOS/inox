@@ -3,6 +3,7 @@ import { pascalCase, quote, snakeCase } from "../utils.js";
 import { renderCsharpConformanceTest } from "../conformance.js";
 import { renderReleaseWorkflow } from "../release.js";
 import {
+  bearerHeaderPrefix,
   childResources,
   createTargetWriter,
   emittedResources,
@@ -122,18 +123,66 @@ public static class Otel
 }
 
 function renderCsharpException(ns: string): string {
+  const sub = (name: string) => `public sealed class ${name} : ApiException
+{
+    public ${name}(int statusCode, string body, string? requestId = null) : base(statusCode, body, requestId) { }
+}`;
   return `namespace ${ns};
 
-public sealed class ApiException : Exception
+public class ApiException : Exception
 {
     public int StatusCode { get; }
     public string Body { get; }
+    /// <summary>The response's x-request-id header, for correlating with server logs.</summary>
+    public string? RequestId { get; }
 
-    public ApiException(int statusCode, string body)
-        : base($"API request failed with status {statusCode}")
+    public ApiException(int statusCode, string body, string? requestId = null)
+        : base($"API request failed with status {statusCode}" + (requestId != null ? $" (request id: {requestId})" : ""))
     {
         StatusCode = statusCode;
         Body = body;
+        RequestId = requestId;
+    }
+
+    // Per-status subclasses (catch ApiException for all).
+    public static ApiException Create(int statusCode, string body, string? requestId) => statusCode switch
+    {
+        400 => new BadRequestError(statusCode, body, requestId),
+        401 => new AuthenticationError(statusCode, body, requestId),
+        403 => new PermissionDeniedError(statusCode, body, requestId),
+        404 => new NotFoundError(statusCode, body, requestId),
+        409 => new ConflictError(statusCode, body, requestId),
+        422 => new UnprocessableEntityError(statusCode, body, requestId),
+        429 => new RateLimitError(statusCode, body, requestId),
+        >= 500 => new InternalServerError(statusCode, body, requestId),
+        _ => new ApiException(statusCode, body, requestId),
+    };
+}
+
+${["BadRequestError", "AuthenticationError", "PermissionDeniedError", "NotFoundError", "ConflictError", "UnprocessableEntityError", "RateLimitError", "InternalServerError"].map(sub).join("\n\n")}
+
+// Internal holder for response metadata captured during a request.
+public sealed class RawHttp
+{
+    public int StatusCode;
+    public System.Net.Http.Headers.HttpResponseHeaders? Headers;
+    public string? RequestId;
+}
+
+// Parsed data plus the raw HTTP status, headers, and request id (from WithRawResponse).
+public sealed class RawResponse<T>
+{
+    public T Data { get; }
+    public int StatusCode { get; }
+    public System.Net.Http.Headers.HttpResponseHeaders? Headers { get; }
+    public string? RequestId { get; }
+
+    public RawResponse(T data, int statusCode, System.Net.Http.Headers.HttpResponseHeaders? headers, string? requestId)
+    {
+        Data = data;
+        StatusCode = statusCode;
+        Headers = headers;
+        RequestId = requestId;
     }
 }
 `;
@@ -150,7 +199,7 @@ function csharpOauthFlows(oauth: ApiIR["client"]["oauth2"]): string {
         using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = new FormUrlEncodedContent(form) };
         var resp = await _http.SendAsync(req);
         var text = await resp.Content.ReadAsStringAsync();
-        if ((int)resp.StatusCode is < 200 or >= 300) throw new ApiException((int)resp.StatusCode, text);
+        if ((int)resp.StatusCode is < 200 or >= 300) throw ApiException.Create((int)resp.StatusCode, text, RequestIdOf(resp));
         var node = JsonNode.Parse(text);
         _cachedToken = node?["access_token"]?.GetValue<string>();
         var expires = node?["expires_in"]?.GetValue<int>() ?? 3600;
@@ -190,7 +239,7 @@ function csharpOauthFlows(oauth: ApiIR["client"]["oauth2"]): string {
         using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = new FormUrlEncodedContent(form) };
         var resp = await _http.SendAsync(req);
         var text = await resp.Content.ReadAsStringAsync();
-        if ((int)resp.StatusCode is < 200 or >= 300) throw new ApiException((int)resp.StatusCode, text);
+        if ((int)resp.StatusCode is < 200 or >= 300) throw ApiException.Create((int)resp.StatusCode, text, RequestIdOf(resp));
         return JsonNode.Parse(text);
     }
 
@@ -216,6 +265,7 @@ function csharpOauthFlows(oauth: ApiIR["client"]["oauth2"]): string {
 }
 
 function renderCsharpClient(ir: ApiIR, ns: string): string {
+  const authPrefix = bearerHeaderPrefix(ir);
   const resources = topLevelResources(ir, "csharp");
   const oauth = ir.client.oauth2;
   const basic = ir.client.auth?.basic;
@@ -333,6 +383,9 @@ ${csharpOauthFlows(oauth)}
         return parts.Count > 0 ? "?" + string.Join("&", parts) : "";
     }
 
+    private static string? RequestIdOf(HttpResponseMessage resp)
+        => resp.Headers.TryGetValues("x-request-id", out var values) ? string.Join(",", values) : null;
+
     private void ApplyHeaders(HttpRequestMessage req, IDictionary<string, string>? headers, string? bearer, int attempt, bool streaming)
     {
         req.Headers.Accept.ParseAdd(streaming ? "text/event-stream" : "application/json");
@@ -343,7 +396,7 @@ ${csharpOauthFlows(oauth)}
             req.Headers.TryAddWithoutValidation("x-stainless-runtime", ".net");
             req.Headers.TryAddWithoutValidation("x-stainless-retry-count", attempt.ToString());
         }
-        if (!string.IsNullOrEmpty(bearer)) req.Headers.TryAddWithoutValidation("authorization", $"Bearer {bearer}");${basic ? `
+        if (!string.IsNullOrEmpty(bearer)) req.Headers.TryAddWithoutValidation("authorization", ${quote(authPrefix)} + bearer);${basic ? `
         else if (!string.IsNullOrEmpty(_basicUser) && !string.IsNullOrEmpty(_basicPass)) req.Headers.TryAddWithoutValidation("authorization", "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_basicUser}:{_basicPass}")));` : ""}
         if (headers != null)
             foreach (var kv in headers) req.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
@@ -368,7 +421,7 @@ ${csharpOauthFlows(oauth)}
         return content;
     }
 
-    public async Task<JsonNode?> RequestAsync(string method, string path, IDictionary<string, object?>? query = null, object? body = null, bool multipart = false, IDictionary<string, string>? headers = null, string? idempotencyKey = null, int? maxRetries = null, double? timeoutSeconds = null, bool formUrlencoded = false, bool textPlain = false)
+    public async Task<JsonNode?> RequestAsync(string method, string path, IDictionary<string, object?>? query = null, object? body = null, bool multipart = false, IDictionary<string, string>? headers = null, string? idempotencyKey = null, int? maxRetries = null, double? timeoutSeconds = null, bool formUrlencoded = false, bool textPlain = false, RawHttp? meta = null)
     {
         var url = _baseUrl + path + BuildQuery(query);
         var bearer = await ResolveBearerAsync();
@@ -409,13 +462,17 @@ ${csharpOauthFlows(oauth)}
                 bearer = await GetTokenAsync(true);
                 continue;
             }
-            if (status is >= 200 and < 300) return string.IsNullOrEmpty(text) ? null : JsonNode.Parse(text);
+            if (status is >= 200 and < 300)
+            {
+                if (meta != null) { meta.StatusCode = status; meta.Headers = resp.Headers; meta.RequestId = RequestIdOf(resp); }
+                return string.IsNullOrEmpty(text) ? null : JsonNode.Parse(text);
+            }
             if (attempt < effectiveRetries && ShouldRetry(resp, status))
             {
                 await Task.Delay(Backoff(attempt, resp));
                 continue;
             }
-            throw new ApiException(status, text);
+            throw ApiException.Create(status, text, RequestIdOf(resp));
         }
         throw new ApiException(0, "retry loop exited unexpectedly");
     }
@@ -428,6 +485,28 @@ ${csharpOauthFlows(oauth)}
     {
         var node = await RequestAsync(method, path, query, body, multipart, headers, idempotencyKey, maxRetries, timeoutSeconds, formUrlencoded, textPlain);
         return node == null ? default : node.Deserialize<T>(JsonOpts);
+    }
+
+    // Typed request returning parsed data plus raw status, headers, and request id.
+    public async Task<RawResponse<T?>> RequestRawAsync<T>(string method, string path, IDictionary<string, object?>? query = null, object? body = null, bool multipart = false, IDictionary<string, string>? headers = null, string? idempotencyKey = null, bool formUrlencoded = false, bool textPlain = false)
+    {
+        var meta = new RawHttp();
+        var node = await RequestAsync(method, path, query, body, multipart, headers, idempotencyKey, null, null, formUrlencoded, textPlain, meta);
+        var data = node == null ? default : node.Deserialize<T>(JsonOpts);
+        return new RawResponse<T?>(data, meta.StatusCode, meta.Headers, meta.RequestId);
+    }
+
+    // GET a (possibly absolute) URL for cursor_url pagination.
+    public async Task<JsonNode?> RequestAbsoluteAsync(string absUrl)
+    {
+        var url = absUrl.StartsWith("http") ? absUrl : _baseUrl + absUrl;
+        var bearer = await ResolveBearerAsync();
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        ApplyHeaders(req, null, bearer, 0, false);
+        var resp = await _http.SendAsync(req);
+        var text = await resp.Content.ReadAsStringAsync();
+        if ((int)resp.StatusCode is < 200 or >= 300) throw ApiException.Create((int)resp.StatusCode, text, RequestIdOf(resp));
+        return string.IsNullOrEmpty(text) ? null : JsonNode.Parse(text);
     }
 
     // application/x-www-form-urlencoded with bracket notation for nested objects/arrays.
@@ -468,7 +547,7 @@ ${csharpOauthFlows(oauth)}
             }
             if (status is >= 200 and < 300) return await resp.Content.ReadAsByteArrayAsync();
             if (attempt < _maxRetries && ShouldRetry(resp, status)) { await Task.Delay(Backoff(attempt, resp)); continue; }
-            throw new ApiException(status, await resp.Content.ReadAsStringAsync());
+            throw ApiException.Create(status, await resp.Content.ReadAsStringAsync(), RequestIdOf(resp));
         }
         throw new ApiException(0, "retry loop exited unexpectedly");
     }
@@ -482,7 +561,7 @@ ${csharpOauthFlows(oauth)}
         if (body != null) req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
         using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         var status = (int)resp.StatusCode;
-        if (status is < 200 or >= 300) throw new ApiException(status, await resp.Content.ReadAsStringAsync(ct));
+        if (status is < 200 or >= 300) throw ApiException.Create(status, await resp.Content.ReadAsStringAsync(ct), RequestIdOf(resp));
         using var stream = await resp.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream);
         var dataLines = new List<string>();
@@ -723,6 +802,12 @@ function renderCsharpResource(ir: ApiIR, ns: string, resource: ResourceIR): stri
   const childProps = children.map((child) => `    public ${child.class_name}Resource ${pascalCase(child.name)} { get; }`).join("\n");
   const childInit = children.map((child) => `        ${pascalCase(child.name)} = new ${child.class_name}Resource(client);`).join("\n");
   const methods = operations.flatMap((operation) => renderCsharpOperation(ir, operation)).filter(Boolean).join("\n\n");
+  // WithRawResponse: plain methods returning RawResponse<T?> (data + status + headers + request id).
+  const rawOps = operations.filter((operation) => !operation.websocket && !operation.streaming && !operation.binary_response && operation.response);
+  const rawMethods = rawOps.map((operation) => renderCsharpRawMethod(ir, operation)).join("\n\n");
+  const rawProp = rawOps.length
+    ? `\n    public ${resource.class_name}RawResource WithRawResponse => new ${resource.class_name}RawResource(_client);\n`
+    : "";
 
   return `using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -739,10 +824,42 @@ ${childProps}
         _client = client;
 ${childInit}
     }
-
+${rawProp}
 ${methods}
 }
+
+public sealed class ${resource.class_name}RawResource
+{
+    private readonly Client _client;
+
+    public ${resource.class_name}RawResource(Client client)
+    {
+        _client = client;
+    }
+
+${rawMethods}
+}
 `;
+}
+
+function renderCsharpRawMethod(ir: ApiIR, operation: OperationIR): string {
+  const plan = csPlan(ir, operation);
+  const name = `${pascalCase(operation.name)}Async`;
+  const extra = operation.request ? ["object body"] : [];
+  const params = csParamList(plan, [...extra, ...(operation.request ? ["string? idempotencyKey = null"] : [])]);
+  const bodyArg = operation.request ? "body: body" : "";
+  const multipart = operation.request?.multipart
+    ? ", multipart: true"
+    : operation.request?.form_urlencoded
+      ? ", formUrlencoded: true"
+      : operation.request?.text_plain
+        ? ", textPlain: true"
+        : "";
+  const idem = operation.request ? ", idempotencyKey: idempotencyKey" : "";
+  const callArgs = [`query: ${csQueryArg(plan)}`, bodyArg, "headers: headers"].filter(Boolean).join(", ");
+  const respType = csResponseType(ir, operation);
+  return `    public Task<RawResponse<${respType}>> ${name}(${params})
+        => _client.RequestRawAsync<${csBare(respType)}>(${quote(operation.http_method)}, $"${plan.pathExpr}", ${callArgs}${multipart}${idem});`;
 }
 
 function renderCsharpOperation(ir: ApiIR, operation: OperationIR): string[] {
@@ -828,6 +945,24 @@ function renderCsharpPager(ir: ApiIR, operation: OperationIR): string {
   const listArgs = [...plan.pathParams.map((p) => p.name), ...plan.queryParams.map((p) => p.name), "headers"].join(", ");
   const itemCs = csType(ir, shape.itemType); // e.g. "Customer?"
   const itemsProp = csProp(responseTypeName(ir, operation), shape.itemsField.name);
+  // cursor_url: follow the absolute next-page URL from the response.
+  if (shape.kind === "cursor_url" && shape.nextUrlField) {
+    const respName = responseTypeName(ir, operation);
+    const urlProp = csProp(respName, shape.nextUrlField.name);
+    return `    public async IAsyncEnumerable<${itemCs}> ${name}(${params})
+    {
+        var _page = await ${pascalCase(operation.name)}Async(${listArgs});
+        while (true)
+        {
+            var items = _page?.${itemsProp} ?? new List<${itemCs}>();
+            foreach (var item in items) yield return item;
+            var _next = _page?.${urlProp};
+            if (string.IsNullOrEmpty(_next)) yield break;
+            var _node = await _client.RequestAbsoluteAsync(_next);
+            _page = _node == null ? default : _node.Deserialize<${csBare(csType(ir, operation.response!))}>(Client.JsonOpts);
+        }
+    }`;
+  }
   const advance = csPagerAdvance(ir, operation, shape);
   const init = shape.kind === "offset" && shape.offsetParam
     ? `        ${csIdent(shape.offsetParam)} ??= 0;\n`

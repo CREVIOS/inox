@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-05-25
+
+### Added
+- Typed per-status error classes in generated SDKs (`BadRequestError`, `AuthenticationError`,
+  `PermissionDeniedError`, `NotFoundError`, `ConflictError`, `UnprocessableEntityError`,
+  `RateLimitError`, `InternalServerError`) so callers can `catch`/`instanceof` specific failures.
+- `x-request-id` surfaced on errors for correlating with server logs.
+- Configurable bearer auth header prefix.
+- `inox --version`; npm auto-publish on `v*` tags; OSS hygiene (CONTRIBUTING, CoC, templates, dependabot).
+
+### Fixed
+- All 12 benchmarked public specs (incl. GitHub, 1,186 ops) now generate TypeScript SDKs
+  that compile with zero errors.
+
 ## [0.1.0] — 2026-05-25
 
 First public release.
