@@ -172,6 +172,7 @@
       <a href="#proof">01 Proof</a>
       <a href="#agents">02 Agents</a>
       <a href="#compare">03 Compare</a>
+      <a href="docs.html">Docs</a>
       <a class="pill" href="https://github.com/CREVIOS/inox">Source ↗</a>
     </div>
   </div>
@@ -284,6 +285,21 @@ node out/mcp/dist/server.js --tools typed --scope read   <span class="c-cmt"># 1
     <div class="cell"><span class="n">MODE B</span><h3>dynamic</h3><p>Three meta-tools to discover &amp; invoke endpoints — for large APIs.</p></div>
     <div class="cell"><span class="n">MODE C</span><h3>code</h3><p>Constrained HTTP <code>execute</code> + <code>search_docs</code>, for code-writing agents.</p></div>
   </div>
+  <p class="lede2" style="margin:26px 0 10px">Drop it into Claude Desktop, Cursor, or any MCP client — point it at the built server:</p>
+  <div class="listing">
+    <div class="lh"><span class="sq"></span> ~/.../claude_desktop_config.json</div>
+<pre>{
+  <span class="kw">"mcpServers"</span>: {
+    <span class="kw">"petstore"</span>: {
+      <span class="kw">"command"</span>: "node",
+      <span class="kw">"args"</span>: ["/abs/path/sdk/mcp/dist/server.js", "--scope", "read"],
+      <span class="kw">"env"</span>: { "PETSTORE_API_KEY": "sk-..." }
+    }
+  }
+}</pre>
+  </div>
+  <p class="lede2" style="margin:14px 0 0">Or run the generator itself as an MCP server so an agent can lint specs, diff the IR,
+    and generate SDKs: <code>inox mcp</code>. Full reference in the <a href="docs.html#mcp">docs</a>.</p>
 </div></section>
 
 <section id="compare"><div class="wrap rise">

@@ -18,7 +18,9 @@ on every build.</p>
 </p>
 
 <p align="center">
-  <a href="https://crevios.github.io/inox/"><b>Live site →</b></a> &nbsp;·&nbsp;
+  <a href="https://crevios.github.io/inox/"><b>Live site</b></a> ·
+  <a href="https://crevios.github.io/inox/docs.html"><b>Docs</b></a> ·
+  <a href="examples/"><b>Examples</b></a> &nbsp;·&nbsp;
   <code>TypeScript</code> · <code>Python</code> · <code>Go</code> · <code>Java</code> · <code>Ruby</code> · <code>C#</code>
 </p>
 

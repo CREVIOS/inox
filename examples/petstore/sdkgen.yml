@@ -1,0 +1,52 @@
+sdkgen: 1
+project:
+  name: petstore
+  display_name: Petstore
+
+spec:
+  path: ./openapi.yaml
+
+# Generate these targets. Add/remove freely.
+targets:
+  typescript:
+    package_name: "@example/petstore"
+  python:
+    package_name: petstore
+  go:
+    module_path: github.com/example/petstore-go
+
+client:
+  class_name: Petstore
+  env_prefix: PETSTORE
+  base_url:
+    default: https://api.petstore.example/v1
+  auth:
+    bearer:
+      env: PETSTORE_API_KEY
+      security_scheme: BearerAuth
+  retries:
+    max_retries: 2
+  timeout:
+    seconds: 30
+
+# A cursor pagination scheme, wired to the list method below.
+pagination:
+  pets_cursor:
+    type: cursor
+    items: $.data
+    request_cursor: cursor
+    response_next_cursor: $.next_cursor
+
+# Resources are optional — Inox auto-derives them from tags/paths. We declare them
+# here to show how to name methods and attach pagination explicitly.
+resources:
+  pets:
+    model: Pet
+    methods:
+      list:
+        endpoint: get /pets
+        pagination: pets_cursor
+      create:
+        endpoint: post /pets
+      retrieve:
+        endpoint: get /pets/{petId}

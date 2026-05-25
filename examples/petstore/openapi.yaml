@@ -1,0 +1,81 @@
+openapi: 3.1.0
+info:
+  title: Petstore
+  version: 1.0.0
+  description: A tiny example API used to demonstrate Inox SDK generation.
+servers:
+  - url: https://api.petstore.example/v1
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Pet:
+      type: object
+      required: [id, name, species]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        species: { type: string, enum: [dog, cat, bird] }
+        tag: { type: string }
+    CreatePet:
+      type: object
+      required: [name, species]
+      properties:
+        name: { type: string }
+        species: { type: string, enum: [dog, cat, bird] }
+        tag: { type: string }
+    PetList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Pet" }
+        next_cursor:
+          type: string
+          nullable: true
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      tags: [pets]
+      summary: List pets
+      parameters:
+        - { name: limit, in: query, schema: { type: integer } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of pets
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PetList" }
+    post:
+      operationId: createPet
+      tags: [pets]
+      summary: Create a pet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePet" }
+      responses:
+        "201":
+          description: The created pet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      tags: [pets]
+      summary: Retrieve a pet
+      parameters:
+        - { name: petId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: A pet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }

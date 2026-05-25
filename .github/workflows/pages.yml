@@ -27,8 +27,8 @@ jobs:
           mkdir -p _site/assets
           cp -R site/. _site/
           cp assets/inox-*.png _site/assets/
-          # site/index.html references ../assets/; flatten to assets/ for the published root
-          sed -i 's#\.\./assets/#assets/#g' _site/index.html
+          # pages reference ../assets/; flatten to assets/ for the published root
+          sed -i 's#\.\./assets/#assets/#g' _site/*.html
           # demo gif (if present) referenced from README/site
           [ -f assets/inox-demo.gif ] && cp assets/inox-demo.gif _site/assets/ || true
       - uses: actions/configure-pages@v5
