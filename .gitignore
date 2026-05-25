@@ -16,3 +16,9 @@ specs/gallery/*.json
 specs/gallery/*.yaml
 specs/gallery/*.yml
 specs/gallery/*.genlog
+.gstack/
+
+# benchmark + gallery generated artifacts (reproducible via scripts)
+benchmarks/specs/
+benchmarks/out/
+gallery/out/

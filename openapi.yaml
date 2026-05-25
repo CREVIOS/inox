@@ -48,6 +48,9 @@ components:
         next_cursor:
           type: string
           nullable: true
+        prev_cursor:
+          type: string
+          nullable: true
     Invoice:
       type: object
       required: [id, amount, status]
@@ -178,6 +181,10 @@ paths:
           schema:
             type: integer
         - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: before
           in: query
           schema:
             type: string

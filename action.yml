@@ -1,0 +1,40 @@
+name: "Inox SDK Generator"
+description: "Generate idiomatic SDKs (TS/Python/Go/Java/Ruby/C#) + an MCP server from an OpenAPI spec."
+branding:
+  icon: "package"
+  color: "purple"
+inputs:
+  config:
+    description: "Path to sdkgen.yml"
+    required: false
+    default: "sdkgen.yml"
+  target:
+    description: "Target language (all, typescript, python, go, java, ruby, csharp)"
+    required: false
+    default: "all"
+  out:
+    description: "Output directory"
+    required: false
+    default: "generated"
+  version:
+    description: "Inox version (npm dist-tag or version)"
+    required: false
+    default: "latest"
+  verify:
+    description: "Run `inox verify` after generating"
+    required: false
+    default: "false"
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+    - name: Generate SDKs
+      shell: bash
+      run: npx -y "@crevious/inox@${{ inputs.version }}" generate -c "${{ inputs.config }}" --target "${{ inputs.target }}" --out "${{ inputs.out }}"
+    - name: Verify
+      if: ${{ inputs.verify == 'true' }}
+      shell: bash
+      run: npx -y "@crevious/inox@${{ inputs.version }}" verify --out "${{ inputs.out }}"

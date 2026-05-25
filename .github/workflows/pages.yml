@@ -22,13 +22,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Assemble site (index.html + assets)
+      - name: Assemble site (index.html, llms.txt, robots.txt, sitemap.xml + assets)
         run: |
           mkdir -p _site/assets
-          cp site/index.html _site/index.html
+          cp -R site/. _site/
           cp assets/inox-*.png _site/assets/
           # site/index.html references ../assets/; flatten to assets/ for the published root
           sed -i 's#\.\./assets/#assets/#g' _site/index.html
+          # demo gif (if present) referenced from README/site
+          [ -f assets/inox-demo.gif ] && cp assets/inox-demo.gif _site/assets/ || true
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -22,6 +22,10 @@ on every build.</p>
   <code>TypeScript</code> · <code>Python</code> · <code>Go</code> · <code>Java</code> · <code>Ruby</code> · <code>C#</code>
 </p>
 
+<p align="center">
+  <img src="assets/inox-demo.gif" alt="inox init → generate → 6 SDKs" width="760">
+</p>
+
 ---
 
 ## Why now
@@ -176,18 +180,41 @@ and the full end-to-end generate-and-verify across every language on each push a
 [`/.github/workflows/pages.yml`](.github/workflows/pages.yml) deploys the landing
 site to GitHub Pages on every push to `main`.
 
-## License
+## Use it in CI (GitHub Action)
 
-MIT.
+```yaml
+# .github/workflows/sdks.yml
+jobs:
+  sdks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: CREVIOS/inox@main
+        with:
+          config: sdkgen.yml
+          target: all          # or typescript / python / go / java / ruby / csharp
+          out: generated
+          verify: "true"
+```
+
+## Reproduce the proof
+
+```bash
+sh benchmarks/build.sh        # fetch 12 public specs, generate + typecheck each
+cat benchmarks/RESULTS.md     # 11/12 compile with zero errors
+```
+
+See [`benchmarks/`](benchmarks/) for the harness and [`gallery/`](gallery/) to publish
+ready-to-use SDK repos for popular APIs.
 
 ## Continuous integration
 
-[`/.github/workflows/ci.yml`](.github/workflows/ci.yml) sets up all six toolchains
-(Node, Python, Go, Java, Ruby, .NET) and runs `npm run check`, the governance lint,
-and the full end-to-end generate-and-verify across every language on each push and PR.
-[`/.github/workflows/pages.yml`](.github/workflows/pages.yml) deploys the landing
-site to GitHub Pages on every push to `main`.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) sets up all six toolchains
+(Node, Python, Go, Java, Ruby, .NET) and runs `npm run check`, the governance lint, and
+the full end-to-end generate-and-verify across every language on each push and PR.
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) deploys the landing site to
+GitHub Pages on every push to `main`.
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).

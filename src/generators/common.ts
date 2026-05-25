@@ -144,6 +144,9 @@ export interface PaginationShape {
   /** cursor */
   nextCursorField?: FieldIR;
   requestCursorParam?: string;
+  /** cursor (bidirectional / backward) */
+  prevCursorField?: FieldIR;
+  requestPrevCursorParam?: string;
   /** cursor_id */
   cursorIdParam?: string;
   cursorItemIdField?: FieldIR;
@@ -191,6 +194,8 @@ export function paginationShape(ir: ApiIR, operation: OperationIR): PaginationSh
     itemType,
     nextCursorField: fieldByName(responseType.fields, pagination.response_next_cursor?.split(".").at(-1)),
     requestCursorParam: paramName(operation, pagination.request_cursor?.split(".").at(-1)),
+    prevCursorField: fieldByName(responseType.fields, pagination.response_prev_cursor?.split(".").at(-1)),
+    requestPrevCursorParam: paramName(operation, pagination.request_prev_cursor?.split(".").at(-1)),
     cursorIdParam: paramName(operation, pagination.cursor_id_param),
     cursorItemIdField: fieldByName(itemFields, pagination.cursor_item_id ?? "id"),
     nextUrlField: fieldByName(responseType.fields, pagination.next_url),

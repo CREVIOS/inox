@@ -37,6 +37,9 @@ client:
     bearer:
       env: ACME_API_KEY
       security_scheme: BearerAuth
+    basic:
+      username_env: ACME_USERNAME
+      password_env: ACME_PASSWORD
     oauth2:
       token_url: /oauth/token
       auth_style: post
@@ -138,6 +141,8 @@ pagination:
     items: $.data
     request_cursor: cursor
     response_next_cursor: $.next_cursor
+    request_prev_cursor: before
+    response_prev_cursor: $.prev_cursor
   invoices_pages:
     type: page_number
     items: $.data

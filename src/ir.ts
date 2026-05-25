@@ -473,17 +473,27 @@ class IrBuilder {
   private buildRequestBody(operation: OpenApiOperation, nameHint: string) {
     const content = operation.requestBody?.content;
     if (!content || Object.keys(content).length === 0) return undefined;
-    const multipartKey = Object.keys(content).find((key) => key.startsWith("multipart/"));
-    const jsonKey = Object.keys(content).find((key) => key === "application/json" || key.endsWith("+json"));
-    const selectedKey = jsonKey ?? multipartKey ?? Object.keys(content)[0] ?? "application/json";
+    const keys = Object.keys(content);
+    const multipartKey = keys.find((key) => key.startsWith("multipart/"));
+    const jsonKey = keys.find((key) => key === "application/json" || key.endsWith("+json"));
+    const formKey = keys.find((key) => key.startsWith("application/x-www-form-urlencoded"));
+    const textKey = keys.find((key) => key.startsWith("text/"));
+    // Selection priority for the typed surface: json > form-urlencoded > multipart > text > first.
+    const selectedKey = jsonKey ?? formKey ?? multipartKey ?? textKey ?? keys[0] ?? "application/json";
     const schema = content[selectedKey]?.schema;
     if (!schema) return undefined;
-    const contentType = multipartKey && !jsonKey ? "multipart/form-data" : selectedKey;
+    const isMultipart = selectedKey === multipartKey && !jsonKey && !formKey;
+    const isForm = selectedKey === formKey && !jsonKey;
+    const isText = selectedKey === textKey && !jsonKey && !formKey && !multipartKey;
+    const contentType = isMultipart ? "multipart/form-data" : selectedKey;
     return {
       required: operation.requestBody?.required ?? false,
       content_type: contentType,
       type: this.schemaToTypeRef(schema, nameHint),
-      multipart: contentType === "multipart/form-data" || schemaHasBinary(this.spec, schema),
+      multipart: contentType === "multipart/form-data" || (!isForm && !isText && schemaHasBinary(this.spec, schema)),
+      form_urlencoded: isForm,
+      text_plain: isText,
+      content_types: keys,
     };
   }
 
@@ -819,6 +829,8 @@ function paginationToIR(id: string, pagination: PaginationConfig): PaginationIR 
     items: stripJsonPath(pagination.items) ?? "data",
     request_cursor: pagination.request_cursor,
     response_next_cursor: stripJsonPath(pagination.response_next_cursor),
+    request_prev_cursor: pagination.request_prev_cursor,
+    response_prev_cursor: stripJsonPath(pagination.response_prev_cursor),
     cursor_id_param: leafName(pagination.cursor_id_param),
     cursor_item_id: leafName(pagination.cursor_item_id),
     next_url: leafName(pagination.next_url),

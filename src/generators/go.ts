@@ -89,6 +89,24 @@ func WithWebhookSecret(secret string) ClientOption {
 }
 `
     : "";
+  const basic = ir.client.auth?.basic;
+  const basicImport = basic ? '\t"encoding/base64"\n' : "";
+  const basicFields = basic ? "\n\tbasicUser string\n\tbasicPass string" : "";
+  const basicInit = basic
+    ? `
+\t\tbasicUser: os.Getenv(${quote(basic.username_env ?? `${ir.client.env_prefix}_USERNAME`)}),
+\t\tbasicPass: os.Getenv(${quote(basic.password_env ?? `${ir.client.env_prefix}_PASSWORD`)}),`
+    : "";
+  const basicOption = basic
+    ? `
+func WithBasicAuth(username, password string) ClientOption {
+\treturn func(client *Client) {
+\t\tclient.basicUser = username
+\t\tclient.basicPass = password
+\t}
+}
+`
+    : "";
   return `package ${packageName}
 
 import (
@@ -96,7 +114,7 @@ import (
 \t"bytes"
 \t"context"
 \tcryptorand "crypto/rand"
-\t"encoding/hex"
+${basicImport}\t"encoding/hex"
 \t"encoding/json"
 \t"fmt"
 \t"io"
@@ -119,7 +137,7 @@ type Client struct {
 \tomitStainlessHeaders bool
 \tidempotencyHeader string
 \tclientID string
-\tclientSecret string
+\tclientSecret string${basicFields}
 \toauth2TokenURL string
 \toauth2Scopes []string
 \toauth2AuthStyle string
@@ -143,7 +161,7 @@ func NewClient(options ...ClientOption) *Client {
 \t\tretryStatuses: map[int]bool{${ir.client.retry_policy.retry_statuses.map((status) => `${status}: true`).join(", ")}},
 \t\tpackageVersion: ${quote(ir.api.version ?? "0.1.0")},
 \t\tomitStainlessHeaders: ${ir.client.omit_stainless_headers ? "true" : "false"},
-\t\tidempotencyHeader: ${quote(ir.client.idempotency_header ?? "")},${oauthInit}
+\t\tidempotencyHeader: ${quote(ir.client.idempotency_header ?? "")},${oauthInit}${basicInit}
 ${webhookConfig}
 \t}
 \tfor _, option := range options {
@@ -262,7 +280,7 @@ func OtelHooks(tracer OtelTracer) []ClientOption {
 \t\t}),
 \t}
 }
-${webhookOption}
+${webhookOption}${basicOption}
 
 func (client *Client) applyDefaultHeaders(request *http.Request, attempt int) {
 \trequest.Header.Set("Accept", "application/json")
@@ -343,18 +361,35 @@ func (client *Client) authorize(ctx context.Context, request *http.Request) erro
 \t}
 \tif client.apiKey != "" {
 \t\trequest.Header.Set("Authorization", "Bearer "+client.apiKey)
-\t}
+\t\treturn nil
+\t}${basic ? `
+\tif client.basicUser != "" && client.basicPass != "" {
+\t\trequest.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(client.basicUser+":"+client.basicPass)))
+\t}` : ""}
 \treturn nil
 }
 
 func (client *Client) do(ctx context.Context, method string, path string, query url.Values, body any, out any) error {
+\treturn client.doEncoded(ctx, method, path, query, body, out, "json")
+}
+
+func (client *Client) doEncoded(ctx context.Context, method string, path string, query url.Values, body any, out any, encoding string) error {
 \tvar payload []byte
+\tcontentType := "application/json"
 \tif body != nil {
-\t\tencoded, err := json.Marshal(body)
-\t\tif err != nil {
-\t\t\treturn err
+\t\tif encoding == "form" {
+\t\t\tpayload = []byte(encodeForm(body))
+\t\t\tcontentType = "application/x-www-form-urlencoded"
+\t\t} else if encoding == "text" {
+\t\t\tpayload = []byte(fmt.Sprint(body))
+\t\t\tcontentType = "text/plain"
+\t\t} else {
+\t\t\tencoded, err := json.Marshal(body)
+\t\t\tif err != nil {
+\t\t\t\treturn err
+\t\t\t}
+\t\t\tpayload = encoded
 \t\t}
-\t\tpayload = encoded
 \t}
 
 \trequestURL := client.baseURL + path
@@ -378,7 +413,7 @@ func (client *Client) do(ctx context.Context, method string, path string, query 
 \t\t\treturn err
 \t\t}
 \t\tif body != nil {
-\t\t\trequest.Header.Set("Content-Type", "application/json")
+\t\t\trequest.Header.Set("Content-Type", contentType)
 \t\t}
 \t\tif client.idempotencyHeader != "" && strings.ToLower(method) != "get" && request.Header.Get(client.idempotencyHeader) == "" {
 \t\t\trequest.Header.Set(client.idempotencyHeader, "stainless-retry-"+randomID())
@@ -698,6 +733,43 @@ func randomID() string {
 \t\treturn fmt.Sprint(time.Now().UnixNano())
 \t}
 \treturn hex.EncodeToString(bytes)
+}
+
+// encodeForm renders a typed body as application/x-www-form-urlencoded with bracket
+// notation for nested objects/arrays (json round-trip keeps it generic over any struct).
+func encodeForm(body any) string {
+\tencoded, err := json.Marshal(body)
+\tif err != nil {
+\t\treturn ""
+\t}
+\tvar generic any
+\tif err := json.Unmarshal(encoded, &generic); err != nil {
+\t\treturn ""
+\t}
+\tvalues := url.Values{}
+\tvar add func(key string, value any)
+\tadd = func(key string, value any) {
+\t\tswitch typed := value.(type) {
+\t\tcase nil:
+\t\t\treturn
+\t\tcase map[string]any:
+\t\t\tfor k, v := range typed {
+\t\t\t\tif key == "" {
+\t\t\t\t\tadd(k, v)
+\t\t\t\t} else {
+\t\t\t\t\tadd(key+"["+k+"]", v)
+\t\t\t\t}
+\t\t\t}
+\t\tcase []any:
+\t\t\tfor i, v := range typed {
+\t\t\t\tadd(fmt.Sprintf("%s[%d]", key, i), v)
+\t\t\t}
+\t\tdefault:
+\t\t\tvalues.Add(key, fmt.Sprint(typed))
+\t\t}
+\t}
+\tadd("", generic)
+\treturn values.Encode()
 }
 `;
 }
@@ -1061,13 +1133,18 @@ ${queryLines ? `${queryLines}\n` : ""}${discriminatorLines}\tvar out []byte
 \treturn out, nil
 }`;
   }
+  const encoding = operation.request?.form_urlencoded ? "form" : operation.request?.text_plain ? "text" : undefined;
+  const doExpr = (target: string) =>
+    encoding
+      ? `service.client.doEncoded(ctx, ${quote(operation.http_method)}, path, query, ${body}, ${target}, ${quote(encoding)})`
+      : `service.client.do(ctx, ${quote(operation.http_method)}, path, query, ${body}, ${target})`;
   const decode = responseType
     ? `\tvar out ${trimPointer(responseType)}
-\tif err := service.client.do(ctx, ${quote(operation.http_method)}, path, query, ${body}, &out); err != nil {
+\tif err := ${doExpr("&out")}; err != nil {
 \t\treturn nil, err
 \t}
 \treturn &out, nil`
-    : `\treturn service.client.do(ctx, ${quote(operation.http_method)}, path, query, ${body}, nil)`;
+    : `\treturn ${doExpr("nil")}`;
   return `func (service *${resource.class_name}Service) ${pascalCase(operation.name)}(ctx context.Context${paramsArg}) ${returnType} {
 \tpath := ${path}
 \tquery := url.Values{}
@@ -1168,6 +1245,74 @@ func (pager *${pagerName}) Current() ${itemType} {
 }
 
 func (pager *${pagerName}) Err() error {
+\treturn pager.err
+}${renderGoBackwardPager(resource, operation, shape, pagerName, paramsName, itemType, itemsField)}`;
+}
+
+// Bidirectional cursor pagination: a backward pager struct walking the prev cursor.
+function renderGoBackwardPager(
+  resource: ResourceIR,
+  operation: OperationIR,
+  shape: NonNullable<ReturnType<typeof paginationShape>>,
+  pagerName: string,
+  paramsName: string,
+  itemType: string,
+  itemsField: string,
+): string {
+  if (shape.kind !== "cursor" || !shape.prevCursorField || !shape.requestPrevCursorParam) return "";
+  const back = `${pagerName}Backward`;
+  const field = pascalCase(shape.prevCursorField.name);
+  const param = pascalCase(shape.requestPrevCursorParam);
+  return `
+
+func (service *${resource.class_name}Service) ${pascalCase(operation.name)}AutoPagingBackward(ctx context.Context, params ${paramsName}) *${back} {
+\treturn &${back}{service: service, ctx: ctx, params: params, index: -1}
+}
+
+type ${back} struct {
+\tservice *${resource.class_name}Service
+\tctx     context.Context
+\tparams  ${paramsName}
+\titems   []${itemType}
+\tindex   int
+\tdone    bool
+\tcurrent ${itemType}
+\terr     error
+}
+
+func (pager *${back}) Next() bool {
+\tif pager.err != nil {
+\t\treturn false
+\t}
+\tfor {
+\t\tpager.index++
+\t\tif pager.index < len(pager.items) {
+\t\t\tpager.current = pager.items[pager.index]
+\t\t\treturn true
+\t\t}
+\t\tif pager.done {
+\t\t\treturn false
+\t\t}
+\t\tpage, err := pager.service.${pascalCase(operation.name)}(pager.ctx, pager.params)
+\t\tif err != nil {
+\t\t\tpager.err = err
+\t\t\treturn false
+\t\t}
+\t\tpager.items = page.${itemsField}
+\t\tpager.index = -1
+\t\tif page.${field} == nil || *page.${field} == "" {
+\t\t\tpager.done = true
+\t\t} else {
+\t\t\tpager.params.${param} = page.${field}
+\t\t}
+\t}
+}
+
+func (pager *${back}) Current() ${itemType} {
+\treturn pager.current
+}
+
+func (pager *${back}) Err() error {
 \treturn pager.err
 }`;
 }
@@ -1281,6 +1426,9 @@ import "${modulePath}"
 client := ${goPackageName(modulePath)}.NewClient()
 _ = client
 \`\`\`
+
+---
+<sub>Generated by [Inox](https://github.com/CREVIOS/inox) — one spec, every SDK.</sub>
 `;
 }
 

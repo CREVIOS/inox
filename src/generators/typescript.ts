@@ -208,7 +208,16 @@ function renderTypeScriptSerde(ir: ApiIR): string {
         return `  ${quote(type.name)}: { kind: "object", fields: [${fields}] },`;
       }
       if (type.kind === "alias") return `  ${quote(type.name)}: { kind: "alias", target: ${refToJson(type.target)} },`;
-      // enum + union: pass the value through unchanged (no wire remap in v1).
+      if (type.kind === "union") {
+        // List the object variant type names; remapping merges their field maps (see remapUnion).
+        const variantIds = type.variants
+          .filter((variant): variant is Extract<TypeRefIR, { kind: "ref" }> => variant.kind === "ref")
+          .map((variant) => typeById(ir, variant.id))
+          .filter((variant): variant is TypeIR => variant?.kind === "object")
+          .map((variant) => quote(variant.name));
+        return `  ${quote(type.name)}: { kind: "union", variants: [${variantIds.join(", ")}] },`;
+      }
+      // enum: scalar value, passes through unchanged.
       return `  ${quote(type.name)}: { kind: "leaf" },`;
     })
     .join("\n");
@@ -223,9 +232,11 @@ type Ref =
   | { k: "array"; items: Ref }
   | { k: "map"; values: Ref };
 
+type Field = { name: string; wire: string; ref: Ref };
 type Schema =
-  | { kind: "object"; fields: { name: string; wire: string; ref: Ref }[] }
+  | { kind: "object"; fields: Field[] }
   | { kind: "alias"; target: Ref }
+  | { kind: "union"; variants: string[] }
   | { kind: "leaf" };
 
 const SCHEMAS: Record<string, Schema> = {
@@ -255,6 +266,7 @@ function fromWire(value: unknown, ref: Ref): unknown {
   if (!schema || schema.kind === "leaf") return value;
   if (schema.kind === "alias") return fromWire(value, schema.target);
   if (typeof value !== "object" || Array.isArray(value)) return value;
+  if (schema.kind === "union") return remapUnion(value as Record<string, unknown>, schema.variants, "from");
   const src = value as Record<string, unknown>;
   // Copy unknown keys verbatim so the SDK is forward-compatible with fields added to the API.
   const out: Record<string, unknown> = { ...src };
@@ -280,6 +292,7 @@ function toWire(value: unknown, ref: Ref): unknown {
   if (!schema || schema.kind === "leaf") return value;
   if (schema.kind === "alias") return toWire(value, schema.target);
   if (typeof value !== "object" || Array.isArray(value) || isBinary(value)) return value;
+  if (schema.kind === "union") return remapUnion(value as Record<string, unknown>, schema.variants, "to");
   const src = value as Record<string, unknown>;
   const out: Record<string, unknown> = { ...src };
   for (const field of schema.fields) {
@@ -287,6 +300,33 @@ function toWire(value: unknown, ref: Ref): unknown {
       if (field.wire !== field.name) delete out[field.name];
       out[field.wire] = toWire(src[field.name], field.ref);
     }
+  }
+  return out;
+}
+
+// A union value (oneOf/anyOf) has no single schema. Merge the field maps of all object variants;
+// remap a key only when every variant that declares it agrees on the mapping (ambiguous keys are
+// left verbatim, so an unmatched or conflicting field is never silently corrupted).
+function remapUnion(value: Record<string, unknown>, variants: string[], dir: "from" | "to"): unknown {
+  const map = new Map<string, { target: string; ref: Ref }>();
+  const ambiguous = new Set<string>();
+  for (const id of variants) {
+    const schema = SCHEMAS[id];
+    if (!schema || schema.kind !== "object") continue;
+    for (const field of schema.fields) {
+      const key = dir === "from" ? field.wire : field.name;
+      const target = dir === "from" ? field.name : field.wire;
+      const existing = map.get(key);
+      if (existing && existing.target !== target) ambiguous.add(key);
+      else map.set(key, { target, ref: field.ref });
+    }
+  }
+  const recurse = dir === "from" ? fromWire : toWire;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const mapping = ambiguous.has(key) ? undefined : map.get(key);
+    if (mapping) out[mapping.target] = recurse(item, mapping.ref);
+    else out[key] = item;
   }
   return out;
 }
@@ -529,6 +569,10 @@ export interface RequestOptions {
   responseType?: string;
   /** Name of the request-body type, used to map camelCase fields to spec wire names before sending. */
   requestType?: string;
+  /** Encode the body as application/x-www-form-urlencoded (bracket notation for nested values). */
+  formUrlencoded?: boolean;
+  /** Send the body as a raw text/plain string. */
+  textBody?: boolean;
   /** When true, the success response body is returned as raw bytes (binary download). */
   binary?: boolean;
 }
@@ -555,7 +599,14 @@ export class Stream<T> implements AsyncIterable<T> {
     private readonly body: ReadableStream<Uint8Array>,
     private readonly sse: boolean,
     private readonly doneSentinel?: string,
+    private readonly typeName?: string,
   ) {}
+
+  /** Parse one event payload, mapping wire names to camelCase when the event type is known. */
+  private decode(raw: string): T {
+    const value = JSON.parse(raw);
+    return this.typeName !== undefined ? deserialize<T>(value, this.typeName) : (value as T);
+  }
 
   async *[Symbol.asyncIterator](): AsyncIterator<T> {
     const decoder = new TextDecoder();
@@ -579,7 +630,7 @@ export class Stream<T> implements AsyncIterable<T> {
           if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
         } else if (line.trim() !== "") {
           if (this.doneSentinel !== undefined && line.trim() === this.doneSentinel) return;
-          yield JSON.parse(line) as T;
+          yield this.decode(line);
         }
       }
     }
@@ -587,7 +638,7 @@ export class Stream<T> implements AsyncIterable<T> {
       const event = this.flush(dataLines);
       if (event !== undefined && event !== DONE) yield event as T;
     } else if (buffer.trim() !== "") {
-      yield JSON.parse(buffer) as T;
+      yield this.decode(buffer);
     }
   }
 
@@ -595,7 +646,7 @@ export class Stream<T> implements AsyncIterable<T> {
     if (dataLines.length === 0) return undefined;
     const data = dataLines.join("\\n");
     if (this.doneSentinel !== undefined && data === this.doneSentinel) return DONE;
-    return JSON.parse(data) as T;
+    return this.decode(data);
   }
 
   private readonly listeners: { chunk: Array<(value: T) => void>; end: Array<() => void>; error: Array<(error: unknown) => void> } = { chunk: [], end: [], error: [] };
@@ -631,7 +682,11 @@ const DONE = Symbol("stream.done");
 
 /** Typed bidirectional WebSocket connection. */
 export class WebSocketConnection<ClientEvent, ServerEvent> {
-  constructor(private readonly ws: WebSocket) {}
+  constructor(
+    private readonly ws: WebSocket,
+    private readonly clientType?: string,
+    private readonly serverType?: string,
+  ) {}
 
   onOpen(handler: () => void): this {
     this.ws.addEventListener("open", () => handler());
@@ -641,7 +696,8 @@ export class WebSocketConnection<ClientEvent, ServerEvent> {
   onMessage(handler: (event: ServerEvent) => void): this {
     this.ws.addEventListener("message", (event: MessageEvent) => {
       const data = typeof event.data === "string" ? event.data : String(event.data);
-      handler(JSON.parse(data) as ServerEvent);
+      const parsed = JSON.parse(data);
+      handler((this.serverType !== undefined ? deserialize<ServerEvent>(parsed, this.serverType) : parsed) as ServerEvent);
     });
     return this;
   }
@@ -652,7 +708,8 @@ export class WebSocketConnection<ClientEvent, ServerEvent> {
   }
 
   send(event: ClientEvent): void {
-    this.ws.send(JSON.stringify(event));
+    const payload = this.clientType !== undefined ? serialize(event, this.clientType) : event;
+    this.ws.send(JSON.stringify(payload));
   }
 
   close(): void {
@@ -761,6 +818,12 @@ export class ApiClient {
     if (options.multipart && outBody && typeof outBody === "object") {
       body = toFormData(outBody as Record<string, unknown>);
       // content-type (with boundary) is set by fetch for FormData bodies.
+    } else if (options.formUrlencoded && outBody && typeof outBody === "object") {
+      headers["content-type"] = "application/x-www-form-urlencoded";
+      body = toFormUrlencoded(outBody as Record<string, unknown>);
+    } else if (options.textBody && outBody !== undefined) {
+      headers["content-type"] = "text/plain";
+      body = typeof outBody === "string" ? outBody : String(outBody);
     } else if (outBody !== undefined) {
       headers["content-type"] = "application/json";
       body = JSON.stringify(outBody);
@@ -842,13 +905,13 @@ export class ApiClient {
       throw new ApiError(response.status, text ? safeJson(text) : undefined);
     }
     if (!response.body) throw new ApiError(response.status, "missing response stream body");
-    return new Stream<T>(response.body, options.sse ?? true, options.doneSentinel);
+    return new Stream<T>(response.body, options.sse ?? true, options.doneSentinel, options.responseType);
   }
 
   /** Opens a typed WebSocket connection to the given path. */
-  connectWebSocket<ClientEvent, ServerEvent>(path: string): WebSocketConnection<ClientEvent, ServerEvent> {
+  connectWebSocket<ClientEvent, ServerEvent>(path: string, clientType?: string, serverType?: string): WebSocketConnection<ClientEvent, ServerEvent> {
     const wsUrl = this.baseUrl.replace(/^http/, "ws") + path;
-    return new WebSocketConnection<ClientEvent, ServerEvent>(new WebSocket(wsUrl));
+    return new WebSocketConnection<ClientEvent, ServerEvent>(new WebSocket(wsUrl), clientType, serverType);
   }
 
   /** Follows an absolute URL returned by cursor_url pagination. */
@@ -881,6 +944,20 @@ function safeJson(text: string): unknown {
   } catch {
     return text;
   }
+}
+
+// application/x-www-form-urlencoded with bracket notation for nested objects/arrays
+// (e.g. Stripe: metadata[key]=value, items[0]=x). Mirrors common deep-form encoders.
+function toFormUrlencoded(body: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const add = (key: string, value: unknown): void => {
+    if (value === undefined || value === null) return;
+    if (Array.isArray(value)) value.forEach((item, index) => add(\`\${key}[\${index}]\`, item));
+    else if (typeof value === "object") for (const [k, v] of Object.entries(value as Record<string, unknown>)) add(\`\${key}[\${k}]\`, v);
+    else parts.push(\`\${encodeURIComponent(key)}=\${encodeURIComponent(String(value))}\`);
+  };
+  for (const [key, value] of Object.entries(body)) add(key, value);
+  return parts.join("&");
 }
 
 function toFormData(body: Record<string, unknown>): FormData {
@@ -940,8 +1017,13 @@ function renderTypeScriptWebhooks(ir: ApiIR): string {
   const webhook = ir.webhooks;
   if (!webhook) return "";
   const payloadType = webhook.payload_type_id ? typeById(ir, webhook.payload_type_id)?.name : undefined;
-  const payloadImport = payloadType ? `import type { ${payloadType} } from "./types/${snakeCase(payloadType)}.js";\n` : "";
+  const payloadImport = payloadType
+    ? `import type { ${payloadType} } from "./types/${snakeCase(payloadType)}.js";\nimport { deserialize } from "./serde.js";\n`
+    : "";
   const returnType = payloadType ?? "unknown";
+  const unwrapReturn = payloadType
+    ? `return deserialize<${returnType}>(JSON.parse(payloadToString(payload)), ${quote(payloadType)});`
+    : `return JSON.parse(payloadToString(payload)) as ${returnType};`;
 
   return `${payloadImport}import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -970,7 +1052,7 @@ export class WebhookClient {
 
   unwrap(payload: string | Buffer, headers: WebhookHeaders): ${returnType} {
     this.verifySignature(payload, headers);
-    return JSON.parse(payloadToString(payload)) as ${returnType};
+    ${unwrapReturn}
   }
 
   verifySignature(payload: string | Buffer, headers: WebhookHeaders): true {
@@ -1230,10 +1312,17 @@ function requestTypeNameFor(ir: ApiIR, operation: OperationIR): string | undefin
   return operation.request?.type.kind === "ref" ? typeById(ir, operation.request.type.id)?.name : undefined;
 }
 
+/** Body-encoding option line for non-JSON request content types (form-urlencoded, text/plain). */
+function bodyEncodingLine(operation: OperationIR, sep: string): string {
+  if (operation.request?.form_urlencoded) return `${sep}formUrlencoded: true,`;
+  if (operation.request?.text_plain) return `${sep}textBody: true,`;
+  return "";
+}
+
 function renderTypeScriptMethod(ir: ApiIR, resource: ResourceIR, operation: OperationIR, mode: "plain" | "non-stream"): string {
   const response = operation.binary_response ? "Uint8Array" : operation.response ? tsType(ir, operation.response) : "unknown";
   const plan = planMethod(ir, resource, operation);
-  const multipart = operation.request?.multipart ? "\n    multipart: true," : "";
+  const multipart = operation.request?.multipart ? "\n    multipart: true," : bodyEncodingLine(operation, "\n    ");
   const binary = operation.binary_response ? "\n    binary: true," : "";
   const responseTypeName = operation.response?.kind === "ref" ? typeById(ir, operation.response.id)?.name : undefined;
   const responseTypeLine = !operation.binary_response && responseTypeName ? `\n    responseType: ${quote(responseTypeName)},` : "";
@@ -1256,15 +1345,18 @@ function renderTypeScriptWebsocketMethod(ir: ApiIR, operation: OperationIR): str
   const ws = operation.websocket;
   const clientType = ws?.client_event_type_id ? typeById(ir, ws.client_event_type_id)?.name ?? "unknown" : "unknown";
   const serverType = ws?.server_event_type_id ? typeById(ir, ws.server_event_type_id)?.name ?? "unknown" : "unknown";
+  // Pass the named event types so the connection can map wire<->camelCase in both directions.
+  const clientArg = clientType !== "unknown" ? `, ${quote(clientType)}` : ", undefined";
+  const serverArg = serverType !== "unknown" ? `, ${quote(serverType)}` : "";
   return `${operation.name}(): WebSocketConnection<${clientType}, ${serverType}> {
-  return this.client.connectWebSocket<${clientType}, ${serverType}>(${quote(operation.path)});
+  return this.client.connectWebSocket<${clientType}, ${serverType}>(${quote(operation.path)}${clientArg}${serverArg});
 }`;
 }
 
 function renderTypeScriptRawMethod(ir: ApiIR, resource: ResourceIR, operation: OperationIR): string {
   const response = operation.response ? tsType(ir, operation.response) : "unknown";
   const plan = planMethod(ir, resource, operation);
-  const multipart = operation.request?.multipart ? " multipart: true," : "";
+  const multipart = operation.request?.multipart ? " multipart: true," : bodyEncodingLine(operation, " ");
   const responseTypeName = operation.response?.kind === "ref" ? typeById(ir, operation.response.id)?.name : undefined;
   const responseTypeLine = responseTypeName ? ` responseType: ${quote(responseTypeName)},` : "";
   const requestTypeName = requestTypeNameFor(ir, operation);
@@ -1288,11 +1380,13 @@ function renderTypeScriptStreamingMethod(ir: ApiIR, resource: ResourceIR, operat
   const done = streaming.done_sentinel ? `\n    doneSentinel: ${quote(streaming.done_sentinel)},` : "";
   const requestTypeName = requestTypeNameFor(ir, operation);
   const requestTypeLine = requestTypeName ? `\n    requestType: ${quote(requestTypeName)},` : "";
+  // Decode each event's wire names to camelCase when the event type is a named type.
+  const responseTypeLine = eventType ? `\n    responseType: ${quote(eventType.name)},` : "";
   return `async ${methodName}(${plan.args}): Promise<Stream<${eventName}>> {
   return this.client.stream<${eventName}>(${quote(operation.http_method)}, ${plan.pathExpr}, {
     ...options,
     query: ${plan.query},
-    body: ${bodyExpr},${requestTypeLine}
+    body: ${bodyExpr},${requestTypeLine}${responseTypeLine}
     sse: ${sse},${done}
   });
 }`;
@@ -1329,16 +1423,34 @@ function renderTypeScriptPaginationMethod(ir: ApiIR, resource: ResourceIR, opera
   }
 
   const advance = renderTsPagerAdvance(shape, itemsField, responseTypeOpt);
-  return `async *${operation.name}AutoPaging(${paramsArg}, options: RequestOptions = {}): AsyncIterable<${itemType}> {
+  const nextCall = hasParams ? `this.${operation.name}(pageParams, options)` : `this.${operation.name}(options)`;
+  const forward = `async *${operation.name}AutoPaging(${paramsArg}, options: RequestOptions = {}): AsyncIterable<${itemType}> {
   let pageParams: ${hasParams ? paramsName : "Record<string, never>"} = { ...params };
   let page = await ${list};
   while (true) {
     const items = (page.${itemsField} ?? []) as ${itemType}[];
     for (const item of items) yield item;
 ${indent(advance, 4)}
-    page = await ${hasParams ? `this.${operation.name}(pageParams, options)` : `this.${operation.name}(options)`};
+    page = await ${nextCall};
   }
 }`;
+  // Bidirectional cursor pagination: emit a backward auto-pager when a prev cursor is configured.
+  if (shape.kind === "cursor" && shape.prevCursorField && shape.requestPrevCursorParam) {
+    const backward = `async *${operation.name}AutoPagingBackward(${paramsArg}, options: RequestOptions = {}): AsyncIterable<${itemType}> {
+  let pageParams: ${hasParams ? paramsName : "Record<string, never>"} = { ...params };
+  let page = await ${list};
+  while (true) {
+    const items = (page.${itemsField} ?? []) as ${itemType}[];
+    for (const item of items) yield item;
+    const prev = page.${shape.prevCursorField.name};
+    if (!prev) return;
+    pageParams = { ...pageParams, ${shape.requestPrevCursorParam}: prev };
+    page = await ${nextCall};
+  }
+}`;
+    return `${forward}\n\n${backward}`;
+  }
+  return forward;
 }
 
 function renderTsPagerAdvance(shape: ReturnType<typeof paginationShape>, itemsField: string, responseTypeOpt = ""): string {
@@ -1417,6 +1529,9 @@ import ${ir.client.name} from "${packageName}";
 const client = new ${ir.client.name}({ apiKey: process.env.${ir.client.env_prefix}_API_KEY });
 ${example}
 \`\`\`
+
+---
+<sub>Generated by [Inox](https://github.com/CREVIOS/inox) — one spec, every SDK.</sub>
 `;
 }
 

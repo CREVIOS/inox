@@ -182,6 +182,9 @@ export interface PaginationConfig {
   /** cursor: request param carrying the cursor, response field with the next cursor. */
   request_cursor?: string;
   response_next_cursor?: string;
+  /** cursor (bidirectional): backward request param + response field with the previous cursor. */
+  request_prev_cursor?: string;
+  response_prev_cursor?: string;
   /** cursor_id: request param + the item property used as the next cursor. */
   cursor_id_param?: string;
   cursor_item_id?: string;
@@ -395,6 +398,12 @@ export interface RequestBodyIR {
   type: TypeRefIR;
   /** true when content_type is multipart/form-data (file upload). */
   multipart: boolean;
+  /** true when content_type is application/x-www-form-urlencoded (e.g. Stripe). */
+  form_urlencoded?: boolean;
+  /** true when content_type is text/plain (raw string body). */
+  text_plain?: boolean;
+  /** All request content types the endpoint accepts (multi-content endpoints list more than one). */
+  content_types?: string[];
 }
 
 export type PaginationKind = "cursor" | "cursor_id" | "cursor_url" | "offset" | "page_number" | "link_header";
@@ -405,6 +414,8 @@ export interface PaginationIR {
   items: string;
   request_cursor?: string;
   response_next_cursor?: string;
+  request_prev_cursor?: string;
+  response_prev_cursor?: string;
   cursor_id_param?: string;
   cursor_item_id?: string;
   next_url?: string;
