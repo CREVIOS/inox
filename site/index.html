@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inox — one spec, every SDK. SDKs + MCP from your OpenAPI spec.</title>
+<meta name="description" content="Self-hosted, air-gapped SDK generator. Your OpenAPI spec → idiomatic SDKs in 6 languages + an MCP server, zero runtime dependencies, verified on every build.">
+<meta property="og:title" content="Inox — one spec, every SDK">
+<meta property="og:description" content="Your OpenAPI spec → 6 idiomatic SDKs + an MCP server. Self-hosted, zero deps, verified.">
+<meta property="og:image" content="../assets/inox-hero.png">
+<meta name="theme-color" content="#f7f7fb">
+<style>
+  :root{
+    --bg:#f7f7fb; --panel:#ffffff; --line:#e8e8f2; --ink:#14161c; --muted:#5b6472;
+    --b1:#6d5efc; --b2:#d946ef; --b3:#1fc7e6; --accent:#6d5efc; --ok:#16a34a;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial;
+  }
+  *{box-sizing:border-box} html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;
+    background-image:radial-gradient(800px 460px at 85% -8%,rgba(217,70,239,.07),transparent),
+      radial-gradient(760px 420px at 5% 0%,rgba(109,94,252,.08),transparent)}
+  a{color:var(--accent);text-decoration:none;font-weight:500} a:hover{text-decoration:underline}
+  .wrap{max-width:980px;margin:0 auto;padding:0 24px}
+  header{padding:22px 0;display:flex;align-items:center;justify-content:space-between}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:-.2px}
+  .brand img{height:32px}
+  nav a{color:var(--muted);margin-left:20px;font-size:14px}
+  .hero{padding:44px 0 12px;text-align:center}
+  .badge{display:inline-block;font-family:var(--mono);font-size:12px;color:var(--b1);
+    border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:6px 14px;margin-bottom:22px;
+    box-shadow:0 1px 2px rgba(20,22,28,.04)}
+  h1{font-size:clamp(36px,6.4vw,64px);line-height:1.04;margin:.1em 0;letter-spacing:-1.5px;font-weight:800;
+    background:linear-gradient(100deg,var(--b1),var(--b2) 55%,var(--b3));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{font-size:clamp(17px,2.4vw,21px);color:var(--muted);max-width:660px;margin:18px auto 0}
+  .langs{margin:20px 0 6px;color:#8b93a3;font-family:var(--mono);font-size:13px}
+  .cta{margin:28px 0 8px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+  .btn{font-weight:600;border-radius:10px;padding:12px 20px;border:1px solid var(--line)}
+  .btn.primary{background:linear-gradient(100deg,var(--b1),var(--b2));color:#fff;border:0;
+    box-shadow:0 8px 22px rgba(109,94,252,.32)}
+  .btn.ghost{background:var(--panel);color:var(--ink)}
+  .shot{margin:32px auto 0;max-width:920px;border:1px solid var(--line);border-radius:16px;overflow:hidden;
+    box-shadow:0 24px 60px rgba(60,40,140,.14)}
+  .shot img{display:block;width:100%}
+  section{padding:46px 0;border-top:1px solid var(--line)}
+  h2{font-size:clamp(22px,3.4vw,30px);margin:0 0 8px;letter-spacing:-.5px}
+  .lede{color:var(--muted);margin:0 0 22px;max-width:680px}
+  pre{background:#fbfbfe;border:1px solid var(--line);border-radius:12px;padding:18px;overflow:auto;
+    font-family:var(--mono);font-size:13.5px;color:#2b2f3a}
+  .c-cmt{color:#9aa0ad} .ok{color:var(--ok);font-weight:600}
+  table{width:100%;border-collapse:collapse;margin-top:8px;font-size:14.5px;background:var(--panel);
+    border-radius:12px;overflow:hidden;box-shadow:0 1px 2px rgba(20,22,28,.04)}
+  th,td{border-bottom:1px solid var(--line);padding:10px 12px;text-align:left}
+  th{background:#fafaff;color:var(--b1);font-weight:600} td.c,th.c{text-align:center}
+  tr:last-child td{border-bottom:0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:10px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;
+    box-shadow:0 1px 2px rgba(20,22,28,.04)}
+  .card h3{margin:.1em 0 .3em;font-size:16px}
+  .card h3 span{background:linear-gradient(100deg,var(--b1),var(--b2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .card p{margin:0;color:var(--muted);font-size:14px}
+  footer{padding:40px 0 64px;color:var(--muted);font-size:13px;border-top:1px solid var(--line);text-align:center}
+  .muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><img src="../assets/inox-icon.png" alt="">Inox</div>
+    <nav><a href="#proof">Proof</a><a href="#agents">Agents</a><a href="#compare">Compare</a><a href="#start">Start</a></nav>
+  </header>
+
+  <div class="hero">
+    <span class="badge">Stainless was acquired &amp; wound down — May 2026</span>
+    <h1>One spec,<br>every SDK.</h1>
+    <p class="sub">Point Inox at your OpenAPI spec. Get idiomatic SDKs in six languages,
+      an MCP server, and a CLI — self-hosted, zero runtime dependencies, verified on every build.</p>
+    <div class="langs">TypeScript · Python · Go · Java · Ruby · C#</div>
+    <div class="cta">
+      <a class="btn primary" href="#start">Get started</a>
+      <a class="btn ghost" href="https://github.com/">View on GitHub</a>
+    </div>
+    <div class="shot"><img src="../assets/inox-hero.png" alt="Inox: one spec to six SDKs"></div>
+  </div>
+</div>
+
+<section id="proof"><div class="wrap">
+  <h2>A real API. 13 lines. SDKs that compile.</h2>
+  <p class="lede">No per-endpoint config. Inox auto-derives resources, methods, every schema,
+    pagination, and auth straight from the spec.</p>
+<pre><span class="c-cmt"># point it at OpenAI's real spec</span>
+inox generate -c openai.sdkgen.yml --target typescript --out out
+cd out/typescript &amp;&amp; npx tsc --noEmit       <span class="c-cmt"># 3,160 files,</span> <span class="ok">0 errors</span></pre>
+  <p class="lede" style="margin-top:22px">Tested on 12 public specs — minimal config each, then <code>tsc --noEmit</code>.
+    <b>11 of 12 compile with zero errors.</b></p>
+  <table>
+    <tr><th>API</th><th class="c">Operations</th><th class="c">TS files</th><th class="c">tsc errors</th></tr>
+    <tr><td>Stripe</td><td class="c">587</td><td class="c">11,356</td><td class="c ok">0</td></tr>
+    <tr><td>OpenAI</td><td class="c">242</td><td class="c">3,160</td><td class="c ok">0</td></tr>
+    <tr><td>DigitalOcean</td><td class="c">632</td><td class="c">55</td><td class="c ok">0</td></tr>
+    <tr><td>Plaid</td><td class="c">330</td><td class="c">2,323</td><td class="c ok">0</td></tr>
+    <tr><td>Box</td><td class="c">296</td><td class="c">1,534</td><td class="c ok">0</td></tr>
+    <tr><td>Asana · Discord · Twilio · Adyen · Ory · SendGrid</td><td class="c">+6</td><td class="c">—</td><td class="c ok">0</td></tr>
+  </table>
+</div></section>
+
+<section id="agents"><div class="wrap">
+  <h2>Any API → agent tools</h2>
+  <p class="lede">One zero-dependency MCP server per API (protocol 2025-06-18). It adapts to
+    API size so big specs don't blow past client tool limits.</p>
+<pre>inox products -c openai.sdkgen.yml --out out
+node out/mcp/dist/server.js --tools typed --scope read   <span class="c-cmt"># 100 read-only tools</span></pre>
+  <div class="grid">
+    <div class="card"><h3><span>typed</span></h3><p>One strongly-typed tool per endpoint, schemas from the spec.</p></div>
+    <div class="card"><h3><span>dynamic</span></h3><p>Three meta-tools to discover &amp; invoke endpoints — for large APIs.</p></div>
+    <div class="card"><h3><span>code</span></h3><p>Constrained HTTP <code>execute</code> + <code>search_docs</code>, for code-writing agents.</p></div>
+  </div>
+</div></section>
+
+<section id="compare"><div class="wrap">
+  <h2>How it compares</h2>
+  <table>
+    <tr><th></th><th class="c">Inox</th><th class="c">Stainless</th><th class="c">Speakeasy</th><th class="c">Fern</th><th class="c">OpenAPI Gen</th></tr>
+    <tr><td>Self-hosted / air-gapped</td><td class="c ok">✓</td><td class="c">✗ wound down</td><td class="c">partial</td><td class="c">partial</td><td class="c ok">✓</td></tr>
+    <tr><td>Zero-dependency runtime</td><td class="c ok">✓</td><td class="c ok">✓</td><td class="c">1 dep</td><td class="c">deps</td><td class="c">✗</td></tr>
+    <tr><td>Runtime conformance (6 langs)</td><td class="c ok">✓</td><td class="c">—</td><td class="c">—</td><td class="c">—</td><td class="c">✗</td></tr>
+    <tr><td>SBOM + SLSA provenance</td><td class="c ok">✓</td><td class="c">partial</td><td class="c">—</td><td class="c">—</td><td class="c">✗</td></tr>
+    <tr><td>MCP server from spec</td><td class="c ok">✓</td><td class="c ok">✓</td><td class="c">—</td><td class="c">—</td><td class="c">✗</td></tr>
+    <tr><td>Price</td><td class="c ok">free / OSS</td><td class="c">acquired</td><td class="c">$$</td><td class="c">$250/mo</td><td class="c">free</td></tr>
+  </table>
+</div></section>
+
+<section id="start"><div class="wrap">
+  <h2>Start in a minute</h2>
+<pre>npm install
+npm run sdkgen -- init --force
+npm run sdkgen -- generate --out generated
+npm run sdkgen -- verify  --out generated   <span class="ok"># PASS × 6 languages</span></pre>
+  <p class="muted">MIT licensed. Runs fully offline. Your spec never leaves your machine.</p>
+</div></section>
+
+<footer><div class="wrap">
+  Inox — self-hosted SDK generation that can't be acquired out from under you.
+</div></footer>
+</body>
+</html>

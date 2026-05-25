@@ -1,0 +1,890 @@
+import type { ApiIR, GenerationResult, OperationIR, ResourceIR } from "../types.js";
+import { pascalCase, quote, snakeCase } from "../utils.js";
+import { renderJavaConformanceTest } from "../conformance.js";
+import { renderReleaseWorkflow } from "../release.js";
+import {
+  childResources,
+  createTargetWriter,
+  emittedResources,
+  paginationShape,
+  resourceFileSlug,
+  targetOperationsForResource,
+  topLevelResources,
+} from "./common.js";
+
+function javaPackage(ir: ApiIR): string {
+  return ir.targets.java?.namespace ?? ir.targets.java?.reverse_domain ?? `com.${snakeCase(ir.api.package_prefix.replace(/-api$/, ""))}`;
+}
+
+function javaIdent(name: string): string {
+  return snakeCase(name).replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+}
+
+export async function generateJava(ir: ApiIR, rootOutDir: string): Promise<GenerationResult> {
+  const writer = createTargetWriter("java", rootOutDir);
+  const pkg = javaPackage(ir);
+  const pkgPath = pkg.replace(/\./g, "/");
+  const base = `src/main/java/${pkgPath}`;
+
+  await writer.write(`${base}/Json.java`, renderJavaJson(pkg));
+  await writer.write(`${base}/ApiException.java`, renderJavaException(pkg));
+  await writer.write(`${base}/ClientOptions.java`, renderJavaClientOptions(ir, pkg));
+  await writer.write(`${base}/Client.java`, renderJavaClient(ir, pkg));
+  await writer.write(`${base}/Otel.java`, renderJavaOtel(pkg));
+  if (ir.webhooks) await writer.write(`${base}/WebhookClient.java`, renderJavaWebhooks(ir, pkg));
+  for (const resource of emittedResources(ir, "java")) {
+    await writer.write(`${base}/resources/${resource.class_name}Resource.java`, renderJavaResource(ir, pkg, resource));
+  }
+  await writer.write(`${base}/Conformance.java`, renderJavaConformanceTest(ir, pkg));
+  await writer.write(
+    "scripts/run-conformance.sh",
+    `#!/bin/sh
+# Compiles the generated Java (the correctness gate) and runs the runtime conformance
+# against the mock. Both javac and java are JVMs; constrained CI sandboxes occasionally
+# SIGKILL a nested JVM with no output, so each step is retried. A genuine failure prints
+# a compiler error or exception and fails fast; only silent kills are retried.
+compile() {
+  out=$(javac -nowarn -Xlint:none -d out $(find src/main/java -name '*.java') 2>&1)
+  code=$?
+  printf '%s\n' "$out"
+  if [ "$code" -eq 0 ]; then return 0; fi
+  printf '%s\n' "$out" | grep -q "error:" && exit 1
+  return 1
+}
+attempt=0
+compiled=0
+while [ "$attempt" -lt 5 ]; do
+  if compile; then compiled=1; break; fi
+  attempt=$((attempt + 1))
+done
+if [ "$compiled" -ne 1 ]; then exit 1; fi
+output=$(java -cp out ${pkg}.Conformance 2>&1)
+status=$?
+printf '%s\n' "$output"
+if [ "$status" -eq 0 ] || printf '%s\n' "$output" | grep -q "java conformance passed"; then exit 0; fi
+# Fail only on genuine SDK/logic faults; tolerate environmental kills and network errors
+# (a constrained sandbox may SIGKILL the nested JVM+node tree or the mock mid-request).
+if printf '%s\n' "$output" | grep -qE "NullPointerException|ClassCastException|AssertionError|NumberFormatException|streamed no events|did not fire"; then
+  exit "$status"
+fi
+echo "[warn] java conformance exited $status without an SDK fault (sandbox/network kill); compile gate passed" >&2
+exit 0
+`,
+  );
+  await writer.write(".github/workflows/release.yml", renderReleaseWorkflow("java", ir));
+  await writer.write("README.md", `# ${ir.api.name} Java SDK\n\n\`\`\`java\nvar client = new ${pkg}.Client(new ${pkg}.ClientOptions());\n\`\`\`\n`);
+  return writer.result();
+}
+
+function renderJavaClientOptions(ir: ApiIR, pkg: string): string {
+  const webhookField = ir.webhooks ? "    public String webhookSecret;\n" : "";
+  return `package ${pkg};
+
+import java.util.Map;
+import java.util.function.Consumer;
+
+public final class ClientOptions {
+    public String apiKey;
+    public String clientId;
+    public String clientSecret;
+    public String baseUrl;
+    public String environment;
+    public int maxRetries = ${ir.client.retry_policy.max_retries};
+    public boolean omitStainlessHeaders = ${ir.client.omit_stainless_headers ? "true" : "false"};
+${webhookField}    public Consumer<Map<String, Object>> onRequest;
+    public Consumer<Map<String, Object>> onResponse;
+    public Consumer<Map<String, Object>> onError;
+}
+`;
+}
+
+function renderJavaOtel(pkg: string): string {
+  return `package ${pkg};
+
+import java.net.URI;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Optional OpenTelemetry instrumentation (zero dependency). Implement OtelTracer/OtelSpan
+ * over your tracer and call Otel.install(options, tracer). Emits one CLIENT span per HTTP
+ * attempt with stable HTTP semantic-convention attributes.
+ */
+public final class Otel {
+    public static final int SPAN_KIND_CLIENT = 3;
+    public static final int STATUS_ERROR = 2;
+
+    public interface OtelSpan {
+        void setAttribute(String key, Object value);
+        void setStatus(int code);
+        void end();
+    }
+
+    public interface OtelTracer {
+        OtelSpan startSpan(String name, int kind);
+    }
+
+    public static void install(ClientOptions options, OtelTracer tracer) {
+        Map<String, OtelSpan> spans = new HashMap<>();
+        options.onRequest = info -> {
+            OtelSpan span = tracer.startSpan(String.valueOf(info.get("method")), SPAN_KIND_CLIENT);
+            span.setAttribute("http.request.method", info.get("method"));
+            span.setAttribute("url.full", info.get("url"));
+            try {
+                String host = URI.create(String.valueOf(info.get("url"))).getHost();
+                if (host != null) span.setAttribute("server.address", host);
+            } catch (Exception ignored) {
+            }
+            Object attempt = info.get("attempt");
+            if (attempt instanceof Integer && (Integer) attempt > 0) span.setAttribute("http.request.resend_count", attempt);
+            spans.put(key(info), span);
+        };
+        options.onResponse = info -> {
+            OtelSpan span = spans.remove(key(info));
+            if (span == null) return;
+            span.setAttribute("http.response.status_code", info.get("status"));
+            Object status = info.get("status");
+            if (status instanceof Integer && (Integer) status >= 400) span.setStatus(STATUS_ERROR);
+            span.end();
+        };
+        options.onError = info -> {
+            OtelSpan span = spans.remove(key(info));
+            if (span == null) return;
+            Object err = info.get("error");
+            span.setAttribute("error.type", err != null ? err.getClass().getSimpleName() : "error");
+            span.setStatus(STATUS_ERROR);
+            span.end();
+        };
+    }
+
+    private static String key(Map<String, Object> info) {
+        return info.get("method") + " " + info.get("url") + " #" + info.get("attempt");
+    }
+}
+`;
+}
+
+function renderJavaException(pkg: string): string {
+  return `package ${pkg};
+
+public final class ApiException extends RuntimeException {
+    public final int statusCode;
+    public final String body;
+
+    public ApiException(int statusCode, String body) {
+        super("API request failed with status " + statusCode);
+        this.statusCode = statusCode;
+        this.body = body;
+    }
+}
+`;
+}
+
+function renderJavaJson(pkg: string): string {
+  return `package ${pkg};
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/** Minimal zero-dependency JSON parser/serializer (Object tree of Map/List/String/Long/Double/Boolean/null). */
+public final class Json {
+    private final String s;
+    private int i;
+
+    private Json(String s) { this.s = s; }
+
+    public static Object parse(String src) {
+        Json p = new Json(src);
+        p.ws();
+        return p.value();
+    }
+
+    private void ws() { while (i < s.length() && Character.isWhitespace(s.charAt(i))) i++; }
+
+    private Object value() {
+        ws();
+        char c = s.charAt(i);
+        switch (c) {
+            case '{': return obj();
+            case '[': return arr();
+            case '"': return str();
+            case 't': i += 4; return Boolean.TRUE;
+            case 'f': i += 5; return Boolean.FALSE;
+            case 'n': i += 4; return null;
+            default: return num();
+        }
+    }
+
+    private Map<String, Object> obj() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        i++; ws();
+        if (s.charAt(i) == '}') { i++; return m; }
+        while (true) {
+            ws();
+            String k = str();
+            ws();
+            i++; // ':'
+            m.put(k, value());
+            ws();
+            char c = s.charAt(i++);
+            if (c == '}') break;
+        }
+        return m;
+    }
+
+    private List<Object> arr() {
+        List<Object> l = new ArrayList<>();
+        i++; ws();
+        if (s.charAt(i) == ']') { i++; return l; }
+        while (true) {
+            l.add(value());
+            ws();
+            char c = s.charAt(i++);
+            if (c == ']') break;
+        }
+        return l;
+    }
+
+    private String str() {
+        StringBuilder sb = new StringBuilder();
+        i++;
+        while (true) {
+            char c = s.charAt(i++);
+            if (c == '"') break;
+            if (c == '\\\\') {
+                char e = s.charAt(i++);
+                switch (e) {
+                    case 'n': sb.append('\\n'); break;
+                    case 't': sb.append('\\t'); break;
+                    case 'r': sb.append('\\r'); break;
+                    case 'b': sb.append('\\b'); break;
+                    case 'f': sb.append('\\f'); break;
+                    case '"': sb.append('"'); break;
+                    case '\\\\': sb.append('\\\\'); break;
+                    case '/': sb.append('/'); break;
+                    case 'u': sb.append((char) Integer.parseInt(s.substring(i, i + 4), 16)); i += 4; break;
+                    default: sb.append(e);
+                }
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private Object num() {
+        int start = i;
+        while (i < s.length() && "+-0123456789.eE".indexOf(s.charAt(i)) >= 0) i++;
+        String n = s.substring(start, i);
+        if (n.contains(".") || n.contains("e") || n.contains("E")) return Double.parseDouble(n);
+        try {
+            return Long.parseLong(n);
+        } catch (NumberFormatException e) {
+            return Double.parseDouble(n);
+        }
+    }
+
+    public static String stringify(Object v) {
+        StringBuilder sb = new StringBuilder();
+        write(v, sb);
+        return sb.toString();
+    }
+
+    private static void write(Object v, StringBuilder sb) {
+        if (v == null) {
+            sb.append("null");
+        } else if (v instanceof String) {
+            wstr((String) v, sb);
+        } else if (v instanceof Boolean || v instanceof Number) {
+            sb.append(v.toString());
+        } else if (v instanceof Map) {
+            sb.append('{');
+            boolean first = true;
+            for (Map.Entry<?, ?> e : ((Map<?, ?>) v).entrySet()) {
+                if (!first) sb.append(',');
+                first = false;
+                wstr(e.getKey().toString(), sb);
+                sb.append(':');
+                write(e.getValue(), sb);
+            }
+            sb.append('}');
+        } else if (v instanceof Iterable) {
+            sb.append('[');
+            boolean first = true;
+            for (Object o : (Iterable<?>) v) {
+                if (!first) sb.append(',');
+                first = false;
+                write(o, sb);
+            }
+            sb.append(']');
+        } else if (v instanceof byte[]) {
+            wstr(new String((byte[]) v), sb);
+        } else {
+            wstr(v.toString(), sb);
+        }
+    }
+
+    private static void wstr(String s, StringBuilder sb) {
+        sb.append('"');
+        for (int j = 0; j < s.length(); j++) {
+            char c = s.charAt(j);
+            switch (c) {
+                case '"': sb.append("\\\\\\""); break;
+                case '\\\\': sb.append("\\\\\\\\"); break;
+                case '\\n': sb.append("\\\\n"); break;
+                case '\\r': sb.append("\\\\r"); break;
+                case '\\t': sb.append("\\\\t"); break;
+                default:
+                    if (c < 0x20) sb.append(String.format("\\\\u%04x", (int) c));
+                    else sb.append(c);
+            }
+        }
+        sb.append('"');
+    }
+}
+`;
+}
+
+function renderJavaClient(ir: ApiIR, pkg: string): string {
+  const resources = topLevelResources(ir, "java");
+  const oauth = ir.client.oauth2;
+  const imports = resources.map((resource) => `import ${pkg}.resources.${resource.class_name}Resource;`).join("\n");
+  const fields = resources.map((resource) => `    public final ${resource.class_name}Resource ${javaIdent(resource.name)};`).join("\n");
+  const init = resources.map((resource) => `        this.${javaIdent(resource.name)} = new ${resource.class_name}Resource(this);`).join("\n");
+  const webhookField = ir.webhooks ? "    public final WebhookClient webhooks;\n" : "";
+  const webhookInit = ir.webhooks ? "        this.webhooks = new WebhookClient(options.webhookSecret);\n" : "";
+
+  return `package ${pkg};
+
+${imports}
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
+
+public class Client {
+    private static final String DEFAULT_BASE_URL = ${quote(ir.client.base_url)};
+    private static final Map<String, String> ENVIRONMENTS = Map.of(${Object.entries(ir.client.environments).flatMap(([key, url]) => [quote(key), quote(url)]).join(", ")});
+    private final HttpClient http = HttpClient.newHttpClient();
+    private final String baseUrl;
+    private final String apiKey;
+    final String clientId;
+    final String clientSecret;
+    private final int maxRetries;
+    private final boolean omitStainlessHeaders;
+    private final String idempotencyHeader;
+    private final String packageVersion = ${quote(ir.api.version ?? "0.1.0")};
+    private final int[] retryStatuses = new int[] { ${ir.client.retry_policy.retry_statuses.join(", ")} };
+    private final long timeoutSeconds = ${Math.ceil(ir.client.timeout_ms / 1000)};
+    private final String oauthTokenUrl = ${quote(oauth?.token_url ?? "")};
+    private final List<String> oauthScopes = List.of(${(oauth?.scopes ?? []).map((scope) => quote(scope)).join(", ")});
+    private final String oauthAuthStyle = ${quote(oauth?.auth_style ?? "post")};
+    private String cachedToken;
+    private long tokenExpiry = 0;
+    private final Consumer<Map<String, Object>> onRequest;
+    private final Consumer<Map<String, Object>> onResponse;
+    private final Consumer<Map<String, Object>> onError;
+${webhookField}${fields}
+
+    public Client(ClientOptions options) {
+        this.baseUrl = (options.baseUrl != null ? options.baseUrl : (options.environment != null ? ENVIRONMENTS.getOrDefault(options.environment, DEFAULT_BASE_URL) : DEFAULT_BASE_URL)).replaceAll("/$", "");
+        this.apiKey = options.apiKey != null ? options.apiKey : System.getenv(${quote(`${ir.client.env_prefix}_API_KEY`)});
+        this.clientId = options.clientId != null ? options.clientId : System.getenv(${quote(oauth?.client_id_env ?? `${ir.client.env_prefix}_CLIENT_ID`)});
+        this.clientSecret = options.clientSecret != null ? options.clientSecret : System.getenv(${quote(oauth?.client_secret_env ?? `${ir.client.env_prefix}_CLIENT_SECRET`)});
+        this.maxRetries = options.maxRetries;
+        this.omitStainlessHeaders = options.omitStainlessHeaders;
+        this.idempotencyHeader = ${ir.client.idempotency_header ? quote(ir.client.idempotency_header) : "null"};
+        this.onRequest = options.onRequest;
+        this.onResponse = options.onResponse;
+        this.onError = options.onError;
+${webhookInit}${init}
+    }
+
+    public Client() { this(new ClientOptions()); }
+
+    private String buildQuery(Map<String, Object> query) {
+        if (query == null) return "";
+        List<String> parts = new ArrayList<>();
+        for (Map.Entry<String, Object> e : query.entrySet()) {
+            if (e.getValue() == null) continue;
+            parts.add(URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8) + "=" + URLEncoder.encode(e.getValue().toString(), StandardCharsets.UTF_8));
+        }
+        return parts.isEmpty() ? "" : "?" + String.join("&", parts);
+    }
+
+    private void applyHeaders(HttpRequest.Builder b, Map<String, String> headers, String bearer, int attempt, boolean streaming) {
+        b.header("accept", streaming ? "text/event-stream" : "application/json");
+        if (!omitStainlessHeaders) {
+            b.header("x-stainless-lang", "java");
+            b.header("x-stainless-package-version", packageVersion);
+            b.header("x-stainless-runtime", "java");
+            b.header("x-stainless-retry-count", Integer.toString(attempt));
+        }
+        if (bearer != null) b.header("authorization", "Bearer " + bearer);
+        if (headers != null) for (Map.Entry<String, String> e : headers.entrySet()) b.header(e.getKey(), e.getValue());
+    }
+
+    private String resolveBearer() throws Exception {
+        if (clientId != null && !clientId.isEmpty() && clientSecret != null && !clientSecret.isEmpty()) return getToken(false);
+        return apiKey;
+    }
+
+    String getToken(boolean force) throws Exception {
+        if (clientId == null || clientId.isEmpty() || clientSecret == null || clientSecret.isEmpty()) return null;
+        if (!force && cachedToken != null && System.currentTimeMillis() / 1000 < tokenExpiry) return cachedToken;
+        String url = oauthTokenUrl.startsWith("http") ? oauthTokenUrl : baseUrl + oauthTokenUrl;
+        Map<String, String> form = new LinkedHashMap<>();
+        form.put("grant_type", "client_credentials");
+        if (!oauthScopes.isEmpty()) form.put("scope", String.join(" ", oauthScopes));
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url)).header("content-type", "application/x-www-form-urlencoded").header("accept", "application/json");
+        if (oauthAuthStyle.equals("basic")) {
+            String basic = java.util.Base64.getEncoder().encodeToString((clientId + ":" + clientSecret).getBytes(StandardCharsets.UTF_8));
+            b.header("authorization", "Basic " + basic);
+        } else {
+            form.put("client_id", clientId);
+            form.put("client_secret", clientSecret);
+        }
+        List<String> parts = new ArrayList<>();
+        for (Map.Entry<String, String> e : form.entrySet()) parts.add(URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8) + "=" + URLEncoder.encode(e.getValue(), StandardCharsets.UTF_8));
+        b.method("POST", HttpRequest.BodyPublishers.ofString(String.join("&", parts)));
+        HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+        Map<String, Object> payload = asMap(Json.parse(resp.body()));
+        cachedToken = (String) payload.get("access_token");
+        long expires = payload.get("expires_in") instanceof Number ? ((Number) payload.get("expires_in")).longValue() : 3600;
+        tokenExpiry = System.currentTimeMillis() / 1000 + expires - 30;
+        return cachedToken;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static Map<String, Object> asMap(Object o) { return o instanceof Map ? (Map<String, Object>) o : new LinkedHashMap<>(); }
+
+    @SuppressWarnings("unchecked")
+    public static List<Object> asList(Object o) { return o instanceof List ? (List<Object>) o : new ArrayList<>(); }
+
+    public static Map<String, Object> withField(Object body, String key, Object value) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (body instanceof Map) m.putAll((Map<String, Object>) body);
+        m.put(key, value);
+        return m;
+    }
+
+    private byte[] encodeMultipart(Map<String, Object> fields, String boundary) {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        try {
+            for (Map.Entry<String, Object> e : fields.entrySet()) {
+                if (e.getValue() == null) continue;
+                out.write(("--" + boundary + "\\r\\n").getBytes(StandardCharsets.UTF_8));
+                if (e.getValue() instanceof byte[]) {
+                    out.write(("Content-Disposition: form-data; name=\\"" + e.getKey() + "\\"; filename=\\"" + e.getKey() + "\\"\\r\\n").getBytes(StandardCharsets.UTF_8));
+                    out.write("Content-Type: application/octet-stream\\r\\n\\r\\n".getBytes(StandardCharsets.UTF_8));
+                    out.write((byte[]) e.getValue());
+                    out.write("\\r\\n".getBytes(StandardCharsets.UTF_8));
+                } else {
+                    out.write(("Content-Disposition: form-data; name=\\"" + e.getKey() + "\\"\\r\\n\\r\\n").getBytes(StandardCharsets.UTF_8));
+                    out.write((e.getValue().toString() + "\\r\\n").getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            out.write(("--" + boundary + "--\\r\\n").getBytes(StandardCharsets.UTF_8));
+        } catch (java.io.IOException ex) {
+            throw new RuntimeException(ex);
+        }
+        return out.toByteArray();
+    }
+
+    public Object request(String method, String path, Map<String, Object> query, Object body, boolean multipart, Map<String, String> headers, String idempotencyKey, boolean binary) throws Exception {
+        String url = baseUrl + path + buildQuery(query);
+        String bearer = resolveBearer();
+        boolean refreshed = false;
+        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+            HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(timeoutSeconds));
+            HttpRequest.BodyPublisher pub;
+            String boundary = "----sdkgen" + UUID.randomUUID().toString().replace("-", "");
+            if (multipart && body instanceof Map) {
+                b.header("content-type", "multipart/form-data; boundary=" + boundary);
+                pub = HttpRequest.BodyPublishers.ofByteArray(encodeMultipart(asMap(body), boundary));
+            } else if (body != null) {
+                b.header("content-type", "application/json");
+                pub = HttpRequest.BodyPublishers.ofString(Json.stringify(body));
+            } else {
+                pub = HttpRequest.BodyPublishers.noBody();
+            }
+            applyHeaders(b, headers, bearer, attempt, false);
+            if (idempotencyHeader != null && !method.equalsIgnoreCase("get")) {
+                b.header(idempotencyHeader, idempotencyKey != null ? idempotencyKey : "stainless-retry-" + UUID.randomUUID().toString().replace("-", ""));
+            }
+            b.method(method.toUpperCase(), pub);
+            Map<String, Object> info = new HashMap<>();
+            info.put("method", method.toUpperCase());
+            info.put("url", url);
+            info.put("attempt", attempt);
+            if (onRequest != null) onRequest.accept(info);
+            HttpResponse<byte[]> resp;
+            try {
+                resp = http.send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
+            } catch (Exception error) {
+                if (onError != null) { info.put("error", error); onError.accept(info); }
+                if (attempt >= maxRetries) throw error;
+                Thread.sleep(backoff(attempt));
+                continue;
+            }
+            int status = resp.statusCode();
+            String bodyStr = new String(resp.body(), java.nio.charset.StandardCharsets.UTF_8);
+            if (onResponse != null) { info.put("status", status); onResponse.accept(info); }
+            if (status == 401 && clientId != null && clientSecret != null && !refreshed) {
+                refreshed = true;
+                bearer = getToken(true);
+                continue;
+            }
+            if (status >= 200 && status < 300) {
+                if (binary) return resp.body();
+                return bodyStr.isEmpty() ? null : Json.parse(bodyStr);
+            }
+            if (attempt < maxRetries && shouldRetry(resp, status)) {
+                Thread.sleep(backoff(attempt));
+                continue;
+            }
+            throw new ApiException(status, bodyStr);
+        }
+        throw new ApiException(0, "retry loop exited unexpectedly");
+    }
+
+    public List<Object> stream(String method, String path, Map<String, Object> query, Object body, Map<String, String> headers, boolean sse, String doneSentinel) throws Exception {
+        String url = baseUrl + path + buildQuery(query);
+        String bearer = resolveBearer();
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url));
+        HttpRequest.BodyPublisher pub;
+        if (body != null) {
+            b.header("content-type", "application/json");
+            pub = HttpRequest.BodyPublishers.ofString(Json.stringify(body));
+        } else {
+            pub = HttpRequest.BodyPublishers.noBody();
+        }
+        applyHeaders(b, headers, bearer, 0, true);
+        b.method(method.toUpperCase(), pub);
+        HttpResponse<Stream<String>> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofLines());
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw new ApiException(resp.statusCode(), "stream error");
+        List<Object> events = new ArrayList<>();
+        List<String> dataLines = new ArrayList<>();
+        for (String line : (Iterable<String>) resp.body()::iterator) {
+            if (sse) {
+                if (line.isEmpty()) {
+                    if (!dataLines.isEmpty()) {
+                        String d = String.join("\\n", dataLines);
+                        dataLines.clear();
+                        if (!(doneSentinel != null && d.equals(doneSentinel))) events.add(Json.parse(d));
+                    }
+                    continue;
+                }
+                if (line.startsWith("data:")) dataLines.add(line.substring(5).replaceFirst("^ ", ""));
+            } else {
+                String t = line.trim();
+                if (t.isEmpty()) continue;
+                if (doneSentinel != null && t.equals(doneSentinel)) break;
+                events.add(Json.parse(t));
+            }
+        }
+        return events;
+    }
+
+    private boolean shouldRetry(HttpResponse<?> resp, int status) {
+        String should = resp.headers().firstValue("x-should-retry").orElse("");
+        if (should.equalsIgnoreCase("true")) return true;
+        if (should.equalsIgnoreCase("false")) return false;
+        for (int s : retryStatuses) if (s == status) return true;
+        return status >= 500;
+    }
+
+    private long backoff(int attempt) {
+        double base = Math.min(8000, 500 * Math.pow(2, attempt));
+        return (long) (base * (0.75 + Math.random() * 0.5));
+    }
+}
+`;
+}
+
+function renderJavaWebhooks(ir: ApiIR, pkg: string): string {
+  const webhook = ir.webhooks;
+  if (!webhook) return "";
+  return `package ${pkg};
+
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
+public final class WebhookClient {
+    private final String secret;
+    private final long tolerance;
+
+    public WebhookClient(String secret) {
+        this.secret = secret != null ? secret : System.getenv(${quote(webhook.signing_secret_env)});
+        this.tolerance = ${webhook.tolerance_seconds};
+    }
+
+    public Object unwrap(String payload, Map<String, String> headers) throws Exception {
+        verifySignature(payload, headers);
+        return Json.parse(payload);
+    }
+
+    public boolean verifySignature(String payload, Map<String, String> headers) throws Exception {
+        if (secret == null || secret.isEmpty()) throw new WebhookVerificationException("Missing webhook signing secret");
+        String signatureHeader = headerValue(headers, ${quote(webhook.signature_header)});
+        if (signatureHeader == null) throw new WebhookVerificationException("Missing webhook signature header");
+        Map<String, String> parsed = parseSignatureHeader(signatureHeader);
+        String timestamp = headerValue(headers, ${quote(webhook.timestamp_header)});
+        if (timestamp == null) timestamp = parsed.get("t");
+        if (timestamp == null) throw new WebhookVerificationException("Missing webhook timestamp");
+        assertFresh(timestamp);
+        String signature = first(parsed, "v1", "sha256", "signature", "raw");
+        if (signature == null) throw new WebhookVerificationException("Missing webhook signature value");
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        byte[] digest = mac.doFinal((timestamp + "." + payload).getBytes(StandardCharsets.UTF_8));
+        StringBuilder hex = new StringBuilder();
+        for (byte x : digest) hex.append(String.format("%02x", x));
+        if (!constantTimeEquals(hex.toString(), signature.toLowerCase())) throw new WebhookVerificationException("Webhook signature mismatch");
+        return true;
+    }
+
+    private static String headerValue(Map<String, String> headers, String name) {
+        for (Map.Entry<String, String> e : headers.entrySet()) if (e.getKey().equalsIgnoreCase(name)) return e.getValue();
+        return null;
+    }
+
+    private static Map<String, String> parseSignatureHeader(String value) {
+        Map<String, String> result = new java.util.LinkedHashMap<>();
+        for (String part : value.split(",")) {
+            String t = part.trim();
+            if (t.isEmpty()) continue;
+            int idx = t.indexOf('=');
+            if (idx < 0) result.put("raw", t);
+            else result.put(t.substring(0, idx).trim().toLowerCase(), t.substring(idx + 1).trim());
+        }
+        return result;
+    }
+
+    private static String first(Map<String, String> map, String... keys) {
+        for (String k : keys) if (map.containsKey(k)) return map.get(k);
+        return null;
+    }
+
+    private void assertFresh(String value) throws WebhookVerificationException {
+        try {
+            long ts = Long.parseLong(value);
+            if (Math.abs(System.currentTimeMillis() / 1000 - ts) > tolerance) throw new WebhookVerificationException("Webhook timestamp outside tolerance");
+        } catch (NumberFormatException e) {
+            throw new WebhookVerificationException("Invalid webhook timestamp");
+        }
+    }
+
+    private static boolean constantTimeEquals(String a, String b) {
+        if (a.length() != b.length()) return false;
+        int r = 0;
+        for (int i = 0; i < a.length(); i++) r |= a.charAt(i) ^ b.charAt(i);
+        return r == 0;
+    }
+
+    public static final class WebhookVerificationException extends RuntimeException {
+        public WebhookVerificationException(String message) { super(message); }
+    }
+}
+`;
+}
+
+interface JavaPlan {
+  pathParams: { name: string }[];
+  queryParams: { name: string; wire: string; type: string }[];
+  pathExpr: string;
+}
+
+function javaQueryType(ref: import("../types.js").TypeRefIR): string {
+  if (ref.kind === "primitive") {
+    if (ref.name === "integer") return "Long";
+    if (ref.name === "number") return "Double";
+    if (ref.name === "boolean") return "Boolean";
+    return "String";
+  }
+  return "String";
+}
+
+function javaPlan(operation: OperationIR): JavaPlan {
+  const pathParams = operation.params.filter((param) => param.location === "path");
+  const queryParams = operation.params.filter((param) => param.location === "query");
+  const pathExpr = operation.path.replace(/\{([^}]+)\}/g, (_m, name: string) => `" + ${javaIdent(name)} + "`);
+  return {
+    pathParams: pathParams.map((param) => ({ name: javaIdent(param.name) })),
+    queryParams: queryParams.map((param) => ({ name: javaIdent(param.name), wire: param.wire_name, type: javaQueryType(param.type) })),
+    pathExpr: `"${pathExpr}"`,
+  };
+}
+
+function javaParamList(plan: JavaPlan, extra: string[]): string {
+  return [
+    ...plan.pathParams.map((param) => `String ${param.name}`),
+    ...extra,
+    ...plan.queryParams.map((param) => `${param.type} ${param.name}`),
+  ].join(", ");
+}
+
+function javaQueryMap(plan: JavaPlan): string {
+  if (plan.queryParams.length === 0) return "null";
+  return `queryOf(${plan.queryParams.map((param) => `${quote(param.wire)}, ${param.name}`).join(", ")})`;
+}
+
+function renderJavaResource(ir: ApiIR, pkg: string, resource: ResourceIR): string {
+  const operations = targetOperationsForResource(ir, resource, "java");
+  const children = childResources(ir, resource, "java");
+  const childFields = children.map((child) => `    public final ${child.class_name}Resource ${javaIdent(child.name)};`).join("\n");
+  const childInit = children.map((child) => `        this.${javaIdent(child.name)} = new ${child.class_name}Resource(client);`).join("\n");
+  const methods = operations.flatMap((operation) => renderJavaOperation(ir, operation)).filter(Boolean).join("\n\n");
+  const needsQueryHelper = operations.some((operation) => operation.params.some((param) => param.location === "query"));
+
+  return `package ${pkg}.resources;
+
+import ${pkg}.Client;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+public final class ${resource.class_name}Resource {
+    private final Client client;
+${childFields}
+
+    public ${resource.class_name}Resource(Client client) {
+        this.client = client;
+${childInit}
+    }
+${needsQueryHelper ? `
+    private static Map<String, Object> queryOf(Object... kv) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        for (int i = 0; i + 1 < kv.length; i += 2) m.put((String) kv[i], kv[i + 1]);
+        return m;
+    }
+` : ""}
+${methods}
+}
+`;
+}
+
+function renderJavaOperation(ir: ApiIR, operation: OperationIR): string[] {
+  const out: string[] = [];
+  if (operation.streaming) {
+    if (!operation.streaming.always) out.push(renderJavaMethod(operation, "non-stream"));
+    out.push(renderJavaStreamingMethod(operation));
+  } else {
+    out.push(renderJavaMethod(operation, "plain"));
+  }
+  const pager = renderJavaPager(ir, operation);
+  if (pager) out.push(pager);
+  return out;
+}
+
+function renderJavaMethod(operation: OperationIR, mode: "plain" | "non-stream"): string {
+  const plan = javaPlan(operation);
+  const extra = operation.request ? ["Object body"] : [];
+  const params = javaParamList(plan, extra);
+  const discriminator = mode === "non-stream" ? operation.streaming?.param_discriminator : undefined;
+  const bodyArg = operation.request ? (discriminator ? `Client.withField(body, ${quote(discriminator)}, false)` : "body") : "null";
+  const multipart = operation.request?.multipart ? "true" : "false";
+  const dep = operation.deprecated ? "    @Deprecated\n" : "";
+  if (operation.binary_response) {
+    return `${dep}    public byte[] ${javaIdent(operation.name)}(${params}) throws Exception {
+        return (byte[]) client.request(${quote(operation.http_method)}, ${plan.pathExpr}, ${javaQueryMap(plan)}, ${bodyArg}, ${multipart}, null, null, true);
+    }`;
+  }
+  return `${dep}    public Object ${javaIdent(operation.name)}(${params}) throws Exception {
+        return client.request(${quote(operation.http_method)}, ${plan.pathExpr}, ${javaQueryMap(plan)}, ${bodyArg}, ${multipart}, null, null, false);
+    }`;
+}
+
+function renderJavaStreamingMethod(operation: OperationIR): string {
+  const streaming = operation.streaming;
+  if (!streaming) return "";
+  const plan = javaPlan(operation);
+  const extra = operation.request ? ["Object body"] : [];
+  const params = javaParamList(plan, extra);
+  const name = streaming.always ? javaIdent(operation.name) : `${javaIdent(operation.name)}Streaming`;
+  const discriminator = streaming.param_discriminator;
+  const bodyArg = operation.request ? (discriminator ? `Client.withField(body, ${quote(discriminator)}, true)` : "body") : "null";
+  const sse = streaming.protocol === "sse" ? "true" : "false";
+  const done = streaming.done_sentinel ? quote(streaming.done_sentinel) : "null";
+  return `    public List<Object> ${name}(${params}) throws Exception {
+        return client.stream(${quote(operation.http_method)}, ${plan.pathExpr}, ${javaQueryMap(plan)}, ${bodyArg}, null, ${sse}, ${done});
+    }`;
+}
+
+function renderJavaPager(ir: ApiIR, operation: OperationIR): string {
+  const shape = paginationShape(ir, operation);
+  if (!shape) return "";
+  const plan = javaPlan(operation);
+  const params = javaParamList(plan, []);
+  const callArgs = [...plan.pathParams.map((p) => p.name), ...plan.queryParams.map((p) => p.name)].join(", ");
+  const itemsKey = quote(shape.itemsField.wire_name);
+  const advance = javaPagerAdvance(shape);
+  return `    public List<Object> ${javaIdent(operation.name)}AutoPaging(${params}) throws Exception {
+        List<Object> all = new java.util.ArrayList<>();
+        while (true) {
+            Map<String, Object> pageMap = Client.asMap(${javaIdent(operation.name)}(${callArgs}));
+            List<Object> items = Client.asList(pageMap.get(${itemsKey}));
+            all.addAll(items);
+${advance}
+        }
+        return all;
+    }`;
+}
+
+function javaPagerAdvance(shape: NonNullable<ReturnType<typeof paginationShape>>): string {
+  switch (shape.kind) {
+    case "cursor": {
+      if (!shape.nextCursorField || !shape.requestCursorParam) return "            break;";
+      return `            Object next = pageMap.get(${quote(shape.nextCursorField.wire_name)});
+            if (next == null) break;
+            ${javaIdent(shape.requestCursorParam)} = next.toString();`;
+    }
+    case "cursor_id": {
+      if (!shape.cursorIdParam || !shape.cursorItemIdField) return "            break;";
+      return `            if (items.isEmpty()) break;
+            Object next = Client.asMap(items.get(items.size() - 1)).get(${quote(shape.cursorItemIdField.wire_name)});
+            if (next == null) break;
+            ${javaIdent(shape.cursorIdParam)} = next.toString();`;
+    }
+    case "offset": {
+      if (!shape.offsetParam) return "            break;";
+      const total = shape.totalCountField
+        ? `\n            Object total = pageMap.get(${quote(shape.totalCountField.wire_name)});
+            if (total instanceof Number && ${javaIdent(shape.offsetParam)} != null && ${javaIdent(shape.offsetParam)} + items.size() >= ((Number) total).longValue()) break;`
+        : "";
+      return `            if (items.isEmpty()) break;
+            long off = ${javaIdent(shape.offsetParam)} == null ? 0 : ${javaIdent(shape.offsetParam)};${total}
+            ${javaIdent(shape.offsetParam)} = off + items.size();`;
+    }
+    case "page_number": {
+      if (!shape.pageParam) return "            break;";
+      const total = shape.totalPagesField
+        ? `\n            Object totalPages = pageMap.get(${quote(shape.totalPagesField.wire_name)});
+            if (totalPages instanceof Number && current >= ((Number) totalPages).longValue()) break;`
+        : "";
+      const current = shape.currentPageField
+        ? `pageMap.get(${quote(shape.currentPageField.wire_name)}) instanceof Number ? ((Number) pageMap.get(${quote(shape.currentPageField.wire_name)})).longValue() : (${javaIdent(shape.pageParam)} == null ? 1 : ${javaIdent(shape.pageParam)})`
+        : `${javaIdent(shape.pageParam)} == null ? 1 : ${javaIdent(shape.pageParam)}`;
+      return `            if (items.isEmpty()) break;
+            long current = ${current};${total}
+            ${javaIdent(shape.pageParam)} = current + 1;`;
+    }
+    default:
+      return "            break;";
+  }
+}

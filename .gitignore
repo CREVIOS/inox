@@ -1,0 +1,18 @@
+node_modules/
+dist/
+generated/
+.sdkgen/
+coverage/
+*.log
+
+# Generated SDK outputs (reproducible via gallery/build.sh)
+specs/out-openai/
+specs/out-stripe/
+specs/out-gallery/
+
+# Large fetched specs (reproducible via curl; see gallery/README.md)
+specs/stripe.json
+specs/gallery/*.json
+specs/gallery/*.yaml
+specs/gallery/*.yml
+specs/gallery/*.genlog

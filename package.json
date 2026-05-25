@@ -1,0 +1,26 @@
+{
+  "name": "sdk-generation-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "sdkgen": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx tests/e2e.test.ts",
+    "sdkgen": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

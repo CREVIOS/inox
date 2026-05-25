@@ -1,0 +1,324 @@
+openapi: 3.1.0
+info:
+  title: Acme API
+  version: 1.0.0
+servers:
+  - url: https://api.acme.test
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Customer:
+      type: object
+      required: [id, email, status]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        status:
+          type: string
+          enum: [active, archived]
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    CustomerCreateParams:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    CustomerList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Customer'
+        next_cursor:
+          type: string
+          nullable: true
+    Invoice:
+      type: object
+      required: [id, amount, status]
+      properties:
+        id:
+          type: string
+        amount:
+          type: integer
+        status:
+          type: string
+          enum: [open, paid, void]
+    InvoiceList:
+      type: object
+      required: [data, page, total_pages]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invoice'
+        page:
+          type: integer
+        total_pages:
+          type: integer
+    Event:
+      type: object
+      required: [id, type, created]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        created:
+          type: integer
+    EventList:
+      type: object
+      required: [data, total]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        total:
+          type: integer
+    FileObject:
+      type: object
+      required: [id, filename, bytes]
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        bytes:
+          type: integer
+    FileUploadParams:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+        purpose:
+          type: string
+    CompletionCreateParams:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+        stream:
+          type: boolean
+    Completion:
+      type: object
+      required: [id, text]
+      properties:
+        id:
+          type: string
+        text:
+          type: string
+    CompletionChunk:
+      type: object
+      required: [id, delta]
+      properties:
+        id:
+          type: string
+        delta:
+          type: string
+    ClientEvent:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+    ServerEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+    WebhookEvent:
+      type: object
+      required: [id, type, created, data]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [customer.created, customer.updated]
+        created:
+          type: integer
+        data:
+          type: object
+          additionalProperties: true
+paths:
+  /v1/customers:
+    get:
+      operationId: listCustomers
+      tags: [customers]
+      summary: List customers
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Customers page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerList'
+    post:
+      operationId: createCustomer
+      tags: [customers]
+      summary: Create a customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerCreateParams'
+      responses:
+        '200':
+          description: Created customer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+  /v1/customers/{customer_id}:
+    get:
+      operationId: retrieveCustomer
+      tags: [customers]
+      summary: Retrieve a customer
+      parameters:
+        - name: customer_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Customer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+  /v1/customers/{customer_id}/invoices:
+    get:
+      operationId: listCustomerInvoices
+      summary: List customer invoices
+      parameters:
+        - name: customer_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Invoice page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceList'
+  /v1/events:
+    get:
+      operationId: listEvents
+      summary: List events
+      parameters:
+        - name: offset
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Event page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventList'
+  /v1/files:
+    post:
+      operationId: uploadFile
+      summary: Upload a file
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/FileUploadParams'
+      responses:
+        '200':
+          description: Uploaded file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileObject'
+  /v1/files/{file_id}:
+    delete:
+      operationId: deleteFile
+      summary: Delete a file
+      parameters:
+        - name: file_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+  /v1/completions:
+    post:
+      operationId: createCompletion
+      summary: Create a completion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletionCreateParams'
+      responses:
+        '200':
+          description: Completion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Completion'
+  /v1/realtime:
+    get:
+      operationId: connectRealtime
+      summary: Realtime WebSocket channel
+      responses:
+        '101':
+          description: Switching Protocols

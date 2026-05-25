@@ -1,0 +1,32 @@
+sdkgen: 1
+organization:
+  name: stripe
+project:
+  name: stripe
+  display_name: Stripe
+spec:
+  path: ./stripe.json
+targets:
+  typescript:
+    package_name: "@inox-demo/stripe"
+    edition: typescript.2026-05-25
+  python:
+    package_name: stripe_inox
+    project_name: stripe-inox
+    edition: python.2026-05-25
+  go:
+    module_path: github.com/inox-demo/stripe-go
+    edition: go.2026-05-25
+client:
+  class_name: Stripe
+  env_prefix: STRIPE
+  base_url:
+    default: https://api.stripe.com
+  auth:
+    bearer:
+      env: STRIPE_API_KEY
+      security_scheme: bearerAuth
+  retries:
+    max_retries: 2
+  timeout:
+    seconds: 80

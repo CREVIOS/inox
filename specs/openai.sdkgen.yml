@@ -1,0 +1,32 @@
+sdkgen: 1
+organization:
+  name: openai
+project:
+  name: openai
+  display_name: OpenAI
+spec:
+  path: ./openai.yaml
+targets:
+  typescript:
+    package_name: "@inox-demo/openai"
+    edition: typescript.2026-05-25
+  python:
+    package_name: openai_inox
+    project_name: openai-inox
+    edition: python.2026-05-25
+  go:
+    module_path: github.com/inox-demo/openai-go
+    edition: go.2026-05-25
+client:
+  class_name: OpenAI
+  env_prefix: OPENAI
+  base_url:
+    default: https://api.openai.com/v1
+  auth:
+    bearer:
+      env: OPENAI_API_KEY
+      security_scheme: ApiKeyAuth
+  retries:
+    max_retries: 2
+  timeout:
+    seconds: 60

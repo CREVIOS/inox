@@ -1,0 +1,153 @@
+sdkgen: 1
+organization:
+  name: acme
+project:
+  name: acme-api
+  display_name: Acme API
+spec:
+  path: ./openapi.yaml
+targets:
+  typescript:
+    package_name: "@acme/acme"
+    edition: typescript.2026-05-25
+  python:
+    package_name: acme
+    project_name: acme-sdk
+    edition: python.2026-05-25
+  go:
+    module_path: github.com/acme/acme-go
+    edition: go.2026-05-25
+  ruby:
+    gem_name: acme
+    edition: ruby.2026-05-25
+  java:
+    namespace: com.acme
+    maven_group: com.acme
+    maven_artifact: acme-java
+    edition: java.2026-05-25
+  csharp:
+    namespace: Acme
+    edition: csharp.2026-05-25
+client:
+  class_name: Acme
+  env_prefix: ACME
+  base_url:
+    default: https://api.acme.test
+  auth:
+    bearer:
+      env: ACME_API_KEY
+      security_scheme: BearerAuth
+    oauth2:
+      token_url: /oauth/token
+      auth_style: post
+      client_id_env: ACME_CLIENT_ID
+      client_secret_env: ACME_CLIENT_SECRET
+  retries:
+    max_retries: 2
+    retry_statuses:
+      - 408
+      - 409
+      - 429
+      - 500
+      - 502
+      - 503
+      - 504
+  timeout:
+    seconds: 60
+  idempotency:
+    header: Idempotency-Key
+webhooks:
+  signing_secret_env: ACME_WEBHOOK_SECRET
+  signature_header: Acme-Signature
+  timestamp_header: Acme-Timestamp
+  tolerance_seconds: 300
+  payload_type: WebhookEvent
+mcp:
+  tools: auto
+  enable_docs_tool: true
+  enable_code_tool: true
+environments:
+  production: https://api.acme.test
+  sandbox: https://sandbox.acme.test
+resources:
+  customers:
+    model: Customer
+    methods:
+      list:
+        endpoint: get /v1/customers
+        pagination: customers_cursor
+      create:
+        endpoint: post /v1/customers
+      retrieve:
+        endpoint: get /v1/customers/{customer_id}
+    subresources:
+      invoices:
+        model: Invoice
+        methods:
+          list:
+            endpoint: get /v1/customers/{customer_id}/invoices
+            pagination: invoices_pages
+  events:
+    model: Event
+    methods:
+      list:
+        endpoint: get /v1/events
+        deprecated: Use the v2 events stream instead
+  files:
+    model: FileObject
+    methods:
+      upload:
+        endpoint: post /v1/files
+      delete:
+        endpoint: delete /v1/files/{file_id}
+        skip:
+          - go
+  completions:
+    methods:
+      create:
+        endpoint: post /v1/completions
+        streaming:
+          event_model: CompletionChunk
+          param_discriminator: stream
+          protocol: sse
+          done_sentinel: "[DONE]"
+  realtime:
+    methods:
+      connect:
+        endpoint: get /v1/realtime
+        type: websocket
+        websocket:
+          client_event_model: ClientEvent
+          server_event_model: ServerEvent
+models:
+  Customer: "#/components/schemas/Customer"
+  CustomerList: "#/components/schemas/CustomerList"
+  WebhookEvent: "#/components/schemas/WebhookEvent"
+  Invoice: "#/components/schemas/Invoice"
+  InvoiceList: "#/components/schemas/InvoiceList"
+  Event: "#/components/schemas/Event"
+  EventList: "#/components/schemas/EventList"
+  FileObject: "#/components/schemas/FileObject"
+  Completion: "#/components/schemas/Completion"
+  CompletionChunk: "#/components/schemas/CompletionChunk"
+  ClientEvent: "#/components/schemas/ClientEvent"
+  ServerEvent: "#/components/schemas/ServerEvent"
+pagination:
+  customers_cursor:
+    type: cursor
+    items: $.data
+    request_cursor: cursor
+    response_next_cursor: $.next_cursor
+  invoices_pages:
+    type: page_number
+    items: $.data
+    page_param: page
+    page_size_param: page_size
+    current_page: $.page
+    total_pages: $.total_pages
+  events_offset:
+    type: offset
+    items: $.data
+    offset_param: offset
+    limit_param: limit
+    total_count: $.total
