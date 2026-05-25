@@ -129,8 +129,8 @@ Pick whichever fits your stack — no Node knowledge required for the bash or Do
 curl -fsSL https://raw.githubusercontent.com/CREVIOS/inox/main/install.sh | bash
 
 # 2) npm — run without installing, or install globally
-npx @crevios/inox --help
-npm install -g @crevios/inox
+npx @crevious/inox --help
+npm install -g @crevious/inox
 
 # 3) Docker — zero local toolchain, works from any language/ecosystem
 docker build -t inox .

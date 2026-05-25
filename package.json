@@ -1,5 +1,5 @@
 {
-  "name": "@crevios/inox",
+  "name": "@crevious/inox",
   "version": "0.1.0",
   "description": "Self-hosted, air-gapped SDK generator: one OpenAPI spec -> idiomatic SDKs in 6 languages + an MCP server. Zero runtime dependencies, verified on every build.",
   "type": "module",
