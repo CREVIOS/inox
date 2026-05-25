@@ -31,7 +31,7 @@ jobs:
           sed -i 's#\.\./assets/#assets/#g' _site/*.html
           # demo gif (if present) referenced from README/site
           [ -f assets/inox-demo.gif ] && cp assets/inox-demo.gif _site/assets/ || true
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
