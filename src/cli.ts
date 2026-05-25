@@ -20,6 +20,8 @@ import { governanceDiagnostics } from "./governance.js";
 import { renderSbom } from "./sbom.js";
 import { renderConnectFiles } from "./connectgen.js";
 import { mcpSelfTest, runMcpServer } from "./mcpserver.js";
+import { applyConfiguredOverlays } from "./transforms.js";
+import { recordFromSpec, recordLive, replayContract, type Cassette } from "./record.js";
 
 interface CliOptions {
   config: string;
@@ -34,6 +36,7 @@ interface CliOptions {
   strictGovernance: boolean;
   gate: boolean;
   against?: string;
+  baseUrl?: string;
 }
 
 async function main(): Promise<void> {
@@ -62,7 +65,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!["lint", "ir", "generate", "mock", "verify", "diff", "release", "products", "studio", "sbom"].includes(command)) {
+  if (!["lint", "ir", "generate", "mock", "verify", "diff", "release", "products", "studio", "sbom", "record", "replay"].includes(command)) {
     throw new Error(`Unknown command: ${command}`);
   }
 
@@ -270,6 +273,36 @@ async function main(): Promise<void> {
       console.error("Breaking change detected (major bump required). Failing the gate.");
       process.exitCode = 1;
     }
+    return;
+  }
+
+  if (command === "record") {
+    const cassettesPath = resolve(".sdkgen/cassettes.json");
+    const cassettes = options.baseUrl
+      ? await recordLive(ir, options.baseUrl, process.env[`${ir.client.env_prefix}_API_KEY`])
+      : recordFromSpec(ir);
+    await mkdir(resolve(".sdkgen"), { recursive: true });
+    await writeFile(cassettesPath, `${JSON.stringify(cassettes, null, 2)}\n`);
+    console.log(`Recorded ${cassettes.length} cassette(s) (${options.baseUrl ? `live from ${options.baseUrl}` : "from spec examples"}) to ${cassettesPath}`);
+    return;
+  }
+
+  if (command === "replay") {
+    let cassettes: Cassette[];
+    try {
+      cassettes = JSON.parse(await readFile(resolve(".sdkgen/cassettes.json"), "utf8")) as Cassette[];
+    } catch {
+      throw new Error("No cassettes found; run `sdkgen record` first.");
+    }
+    const drift = replayContract(ir, cassettes);
+    if (drift.length === 0) {
+      console.log(`Replayed ${cassettes.length} cassette(s): contract holds, no drift.`);
+    } else {
+      printDiagnostics(drift);
+      console.error(`Contract drift in ${drift.length} place(s).`);
+      if (options.gate) process.exitCode = 1;
+    }
+    return;
   }
 }
 
@@ -288,12 +321,13 @@ async function loadProject(configPath: string) {
   const loadedConfig = await readConfig(configPath);
   const specPath = resolveSpecPath(loadedConfig.config, loadedConfig.path);
   const loadedSpec = await readOpenApiSpec(specPath);
+  const overlayDiagnostics = await applyConfiguredOverlays(loadedSpec.spec, loadedConfig.config, loadedConfig.path);
   const ir = buildIR({
     config: loadedConfig.config,
     configRaw: loadedConfig.raw,
     spec: loadedSpec.spec,
     specRaw: loadedSpec.raw,
-    diagnostics: [...loadedConfig.diagnostics, ...loadedSpec.diagnostics],
+    diagnostics: [...loadedConfig.diagnostics, ...loadedSpec.diagnostics, ...overlayDiagnostics],
   });
   return { loadedConfig, loadedSpec, ir };
 }
@@ -342,6 +376,8 @@ function parseOptions(args: string[]): CliOptions {
       options.pretty = false;
     } else if (arg === "--against") {
       options.against = requiredValue(args, ++index, arg);
+    } else if (arg === "--base-url") {
+      options.baseUrl = requiredValue(args, ++index, arg);
     } else {
       throw new Error(`Unknown option: ${arg}`);
     }
@@ -376,7 +412,7 @@ function printDiagnostics(diagnostics: Diagnostic[]): void {
 }
 
 function printHelp(): void {
-  console.log(`sdkgen
+  console.log(`inox — one spec, every SDK
 
 Commands:
   init                 Write sample sdkgen.yml and openapi.yaml
@@ -390,6 +426,8 @@ Commands:
   products             Generate docs, CLI, MCP server, Terraform provider, CI automation
   studio               Serve the offline Studio web UI over the IR (--port, --self-test)
   mcp                  Run the generator itself as an MCP server over stdio (--self-test)
+  record               Record contract cassettes (spec examples, or live via --base-url)
+  replay               Replay cassettes against the IR to detect contract drift (--gate)
   sbom                 Write a CycloneDX SBOM per target (zero-dependency runtime)
 
 Options:

@@ -84,6 +84,7 @@ export async function generateTypeScript(ir: ApiIR, rootOutDir: string): Promise
   );
 
   await writer.write("src/core.ts", renderTypeScriptCore());
+  await writer.write("src/serde.ts", renderTypeScriptSerde(ir));
   await writer.write("src/validation.ts", renderTypeScriptValidation(ir));
   await writer.write("src/otel.ts", renderTypeScriptOtel());
   await writer.write("src/index.ts", renderTypeScriptIndex(ir));
@@ -185,6 +186,117 @@ export function createOtelHooks(tracer: OtelTracer): ClientHooks {
       spans.delete(key(info.method, info.url, info.attempt));
     },
   };
+}
+`;
+}
+
+function renderTypeScriptSerde(ir: ApiIR): string {
+  // prim/file values pass through untouched ("leaf"); only object/array/map/ref nodes
+  // carry name<->wire mapping.
+  const refToJson = (ref: TypeRefIR): string => {
+    if (ref.kind === "ref") return `{ k: "ref", id: ${quote(typeById(ir, ref.id)?.name ?? "unknown")} }`;
+    if (ref.kind === "array") return `{ k: "array", items: ${refToJson(ref.items)} }`;
+    if (ref.kind === "map") return `{ k: "map", values: ${refToJson(ref.values)} }`;
+    return `{ k: "leaf" }`;
+  };
+  const schemas = ir.types
+    .map((type) => {
+      if (type.kind === "object") {
+        const fields = type.fields
+          .map((field) => `{ name: ${quote(field.name)}, wire: ${quote(field.wire_name)}, ref: ${refToJson(field.type)} }`)
+          .join(", ");
+        return `  ${quote(type.name)}: { kind: "object", fields: [${fields}] },`;
+      }
+      if (type.kind === "alias") return `  ${quote(type.name)}: { kind: "alias", target: ${refToJson(type.target)} },`;
+      // enum + union: pass the value through unchanged (no wire remap in v1).
+      return `  ${quote(type.name)}: { kind: "leaf" },`;
+    })
+    .join("\n");
+
+  return `// Dependency-free wire (de)serialization. Maps idiomatic camelCase SDK fields to and
+// from the JSON wire names declared in the API spec, in both directions, so the typed
+// surface stays idiomatic while requests and responses use the exact spec names.
+
+type Ref =
+  | { k: "leaf" }
+  | { k: "ref"; id: string }
+  | { k: "array"; items: Ref }
+  | { k: "map"; values: Ref };
+
+type Schema =
+  | { kind: "object"; fields: { name: string; wire: string; ref: Ref }[] }
+  | { kind: "alias"; target: Ref }
+  | { kind: "leaf" };
+
+const SCHEMAS: Record<string, Schema> = {
+${schemas}
+};
+
+/** Raw JSON value (wire names) -> SDK value (camelCase names). */
+export function deserialize<T = unknown>(value: unknown, typeName: string): T {
+  return fromWire(value, { k: "ref", id: typeName }) as T;
+}
+
+/** SDK value (camelCase names) -> raw JSON value (wire names). */
+export function serialize(value: unknown, typeName: string): unknown {
+  return toWire(value, { k: "ref", id: typeName });
+}
+
+function fromWire(value: unknown, ref: Ref): unknown {
+  if (value === null || value === undefined || ref.k === "leaf") return value;
+  if (ref.k === "array") return Array.isArray(value) ? value.map((item) => fromWire(item, ref.items)) : value;
+  if (ref.k === "map") {
+    if (typeof value !== "object") return value;
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) out[key] = fromWire(item, ref.values);
+    return out;
+  }
+  const schema = SCHEMAS[ref.id];
+  if (!schema || schema.kind === "leaf") return value;
+  if (schema.kind === "alias") return fromWire(value, schema.target);
+  if (typeof value !== "object" || Array.isArray(value)) return value;
+  const src = value as Record<string, unknown>;
+  // Copy unknown keys verbatim so the SDK is forward-compatible with fields added to the API.
+  const out: Record<string, unknown> = { ...src };
+  for (const field of schema.fields) {
+    if (field.wire in src) {
+      if (field.wire !== field.name) delete out[field.wire];
+      out[field.name] = fromWire(src[field.wire], field.ref);
+    }
+  }
+  return out;
+}
+
+function toWire(value: unknown, ref: Ref): unknown {
+  if (value === null || value === undefined || ref.k === "leaf") return value;
+  if (ref.k === "array") return Array.isArray(value) ? value.map((item) => toWire(item, ref.items)) : value;
+  if (ref.k === "map") {
+    if (typeof value !== "object") return value;
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) out[key] = toWire(item, ref.values);
+    return out;
+  }
+  const schema = SCHEMAS[ref.id];
+  if (!schema || schema.kind === "leaf") return value;
+  if (schema.kind === "alias") return toWire(value, schema.target);
+  if (typeof value !== "object" || Array.isArray(value) || isBinary(value)) return value;
+  const src = value as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...src };
+  for (const field of schema.fields) {
+    if (field.name in src) {
+      if (field.wire !== field.name) delete out[field.name];
+      out[field.wire] = toWire(src[field.name], field.ref);
+    }
+  }
+  return out;
+}
+
+function isBinary(value: unknown): boolean {
+  return (
+    (typeof Blob !== "undefined" && value instanceof Blob) ||
+    value instanceof ArrayBuffer ||
+    ArrayBuffer.isView(value)
+  );
 }
 `;
 }
@@ -357,7 +469,9 @@ ${initializers.join("\n")}
 }
 
 function renderTypeScriptCore(): string {
-  return `export interface ClientOptions {
+  return `import { deserialize, serialize } from "./serde.js";
+
+export interface ClientOptions {
   apiKey?: string;
   clientId?: string;
   clientSecret?: string;
@@ -413,6 +527,8 @@ export interface RequestOptions {
   maxRetries?: number;
   idempotencyKey?: string;
   responseType?: string;
+  /** Name of the request-body type, used to map camelCase fields to spec wire names before sending. */
+  requestType?: string;
   /** When true, the success response body is returned as raw bytes (binary download). */
   binary?: boolean;
 }
@@ -638,12 +754,16 @@ export class ApiClient {
     else if (this.basicAuth) headers.authorization = this.basicAuth;
 
     let body: BodyInit | undefined;
-    if (options.multipart && options.body && typeof options.body === "object") {
-      body = toFormData(options.body as Record<string, unknown>);
+    // Map idiomatic camelCase body fields to spec wire names (file/Blob values pass through).
+    const outBody = options.requestType !== undefined && options.body !== undefined
+      ? serialize(options.body, options.requestType)
+      : options.body;
+    if (options.multipart && outBody && typeof outBody === "object") {
+      body = toFormData(outBody as Record<string, unknown>);
       // content-type (with boundary) is set by fetch for FormData bodies.
-    } else if (options.body !== undefined) {
+    } else if (outBody !== undefined) {
       headers["content-type"] = "application/json";
-      body = JSON.stringify(options.body);
+      body = JSON.stringify(outBody);
     }
     if (this.idempotencyHeader && method.toLowerCase() !== "get" && !hasHeader(headers, this.idempotencyHeader)) {
       headers[this.idempotencyHeader] = options.idempotencyKey ?? \`stainless-retry-\${randomId()}\`;
@@ -679,10 +799,14 @@ export class ApiClient {
         const responseText = await response.text();
         const parsed = responseText ? JSON.parse(responseText) : undefined;
         if (response.ok) {
+          // Validation runs on the raw (wire-named) body before deserialization remaps keys.
           if (this.validateResponses && options.responseType && parsed !== undefined && this.validate) {
             this.validate(parsed, options.responseType);
           }
-          return { data: parsed as T, response };
+          const data = options.responseType !== undefined && parsed !== undefined
+            ? deserialize<T>(parsed, options.responseType)
+            : (parsed as T);
+          return { data, response };
         }
         if (response.status === 401 && this.oauth2?.clientId && !refreshed) {
           refreshed = true;
@@ -970,7 +1094,9 @@ ${fields}${extra}
 
 function renderTypeScriptField(ir: ApiIR, field: FieldIR): string {
   const optional = field.required ? "" : "?";
-  const nullable = field.nullable ? " | null" : "";
+  // tsType() already appends `| null` when the type ref itself is nullable; only add
+  // the field-level `| null` when it isn't already covered, else we emit `| null | null`.
+  const nullable = field.nullable && !field.type.nullable ? " | null" : "";
   return `${tsDoc(field.description, "  ")}  ${field.name}${optional}: ${tsType(ir, field.type)}${nullable};`;
 }
 
@@ -1099,6 +1225,11 @@ function renderTypeScriptOperation(ir: ApiIR, resource: ResourceIR, operation: O
   return methods.map((method, index) => (index === 0 ? `${tsDeprecation(operation)}${method}` : method));
 }
 
+/** Wire-name mapping is applied to a request body only when it is a named (ref) type. */
+function requestTypeNameFor(ir: ApiIR, operation: OperationIR): string | undefined {
+  return operation.request?.type.kind === "ref" ? typeById(ir, operation.request.type.id)?.name : undefined;
+}
+
 function renderTypeScriptMethod(ir: ApiIR, resource: ResourceIR, operation: OperationIR, mode: "plain" | "non-stream"): string {
   const response = operation.binary_response ? "Uint8Array" : operation.response ? tsType(ir, operation.response) : "unknown";
   const plan = planMethod(ir, resource, operation);
@@ -1106,6 +1237,8 @@ function renderTypeScriptMethod(ir: ApiIR, resource: ResourceIR, operation: Oper
   const binary = operation.binary_response ? "\n    binary: true," : "";
   const responseTypeName = operation.response?.kind === "ref" ? typeById(ir, operation.response.id)?.name : undefined;
   const responseTypeLine = !operation.binary_response && responseTypeName ? `\n    responseType: ${quote(responseTypeName)},` : "";
+  const requestTypeName = requestTypeNameFor(ir, operation);
+  const requestTypeLine = requestTypeName ? `\n    requestType: ${quote(requestTypeName)},` : "";
   const discriminator = mode === "non-stream" && operation.streaming?.param_discriminator;
   const bodyExpr = discriminator && operation.request
     ? `{ ...params.body, ${quote(discriminator)}: false }`
@@ -1114,7 +1247,7 @@ function renderTypeScriptMethod(ir: ApiIR, resource: ResourceIR, operation: Oper
   return this.client.request<${response}>(${quote(operation.http_method)}, ${plan.pathExpr}, {
     ...options,
     query: ${plan.query},
-    body: ${bodyExpr},${multipart}${binary}${responseTypeLine}
+    body: ${bodyExpr},${multipart}${binary}${responseTypeLine}${requestTypeLine}
   });
 }`;
 }
@@ -1134,8 +1267,10 @@ function renderTypeScriptRawMethod(ir: ApiIR, resource: ResourceIR, operation: O
   const multipart = operation.request?.multipart ? " multipart: true," : "";
   const responseTypeName = operation.response?.kind === "ref" ? typeById(ir, operation.response.id)?.name : undefined;
   const responseTypeLine = responseTypeName ? ` responseType: ${quote(responseTypeName)},` : "";
+  const requestTypeName = requestTypeNameFor(ir, operation);
+  const requestTypeLine = requestTypeName ? ` requestType: ${quote(requestTypeName)},` : "";
   return `      ${operation.name}: (${plan.args}): Promise<{ data: ${response}; response: globalThis.Response }> =>
-        this.client.requestRaw<${response}>(${quote(operation.http_method)}, ${plan.pathExpr}, { ...options, query: ${plan.query}, body: ${plan.bodyExpr},${multipart}${responseTypeLine} }),`;
+        this.client.requestRaw<${response}>(${quote(operation.http_method)}, ${plan.pathExpr}, { ...options, query: ${plan.query}, body: ${plan.bodyExpr},${multipart}${responseTypeLine}${requestTypeLine} }),`;
 }
 
 function renderTypeScriptStreamingMethod(ir: ApiIR, resource: ResourceIR, operation: OperationIR): string {
@@ -1151,11 +1286,13 @@ function renderTypeScriptStreamingMethod(ir: ApiIR, resource: ResourceIR, operat
     : plan.bodyExpr;
   const sse = streaming.protocol === "sse";
   const done = streaming.done_sentinel ? `\n    doneSentinel: ${quote(streaming.done_sentinel)},` : "";
+  const requestTypeName = requestTypeNameFor(ir, operation);
+  const requestTypeLine = requestTypeName ? `\n    requestType: ${quote(requestTypeName)},` : "";
   return `async ${methodName}(${plan.args}): Promise<Stream<${eventName}>> {
   return this.client.stream<${eventName}>(${quote(operation.http_method)}, ${plan.pathExpr}, {
     ...options,
     query: ${plan.query},
-    body: ${bodyExpr},
+    body: ${bodyExpr},${requestTypeLine}
     sse: ${sse},${done}
   });
 }`;
@@ -1170,6 +1307,9 @@ function renderTypeScriptPaginationMethod(ir: ApiIR, resource: ResourceIR, opera
   const hasParams = operation.params.length > 0 || Boolean(operation.request);
   const paramsArg = hasParams ? `params: ${paramsName} = {} as ${paramsName}` : "params: Record<string, never> = {}";
   const list = `this.${operation.name}(${hasParams ? "pageParams" : ""}${hasParams ? ", options" : "options"})`;
+  // After requestRaw deserializes the body, every field is the idiomatic camelCase name.
+  const responseTypeName = operation.response?.kind === "ref" ? typeById(ir, operation.response.id)?.name : undefined;
+  const responseTypeOpt = responseTypeName ? `, responseType: ${quote(responseTypeName)}` : "";
 
   // RFC 5988 Link-header pagination: the next-page URL is in the response's `Link` header
   // (rel="next"), so this pager drives requestRaw directly to inspect headers per page.
@@ -1177,18 +1317,18 @@ function renderTypeScriptPaginationMethod(ir: ApiIR, resource: ResourceIR, opera
     const plan = planMethod(ir, resource, operation);
     const responseType = operation.response ? tsType(ir, operation.response) : "unknown";
     return `async *${operation.name}AutoPaging(${plan.args}): AsyncIterable<${itemType}> {
-  let result = await this.client.requestRaw<${responseType}>(${quote(operation.http_method)}, ${plan.pathExpr}, { ...options, query: ${plan.query} });
+  let result = await this.client.requestRaw<${responseType}>(${quote(operation.http_method)}, ${plan.pathExpr}, { ...options, query: ${plan.query}${responseTypeOpt} });
   while (true) {
     const items = ((result.data as unknown as Record<string, unknown>)[${quote(itemsField)}] ?? []) as ${itemType}[];
     for (const item of items) yield item;
     const next = this.client.nextLink(result.response);
     if (!next) return;
-    result = await this.client.requestAbsoluteRaw<${responseType}>(next, options);
+    result = await this.client.requestAbsoluteRaw<${responseType}>(next, { ...options${responseTypeOpt} });
   }
 }`;
   }
 
-  const advance = renderTsPagerAdvance(shape, itemsField);
+  const advance = renderTsPagerAdvance(shape, itemsField, responseTypeOpt);
   return `async *${operation.name}AutoPaging(${paramsArg}, options: RequestOptions = {}): AsyncIterable<${itemType}> {
   let pageParams: ${hasParams ? paramsName : "Record<string, never>"} = { ...params };
   let page = await ${list};
@@ -1201,7 +1341,7 @@ ${indent(advance, 4)}
 }`;
 }
 
-function renderTsPagerAdvance(shape: ReturnType<typeof paginationShape>, itemsField: string): string {
+function renderTsPagerAdvance(shape: ReturnType<typeof paginationShape>, itemsField: string, responseTypeOpt = ""): string {
   if (!shape) return "return;";
   switch (shape.kind) {
     case "cursor": {
@@ -1212,9 +1352,10 @@ pageParams = { ...pageParams, ${shape.requestCursorParam}: next };`;
     }
     case "cursor_id": {
       if (!shape.cursorIdParam || !shape.cursorItemIdField) return "return;";
+      // items are already deserialized, so read the item id by its camelCase name.
       return `if (items.length === 0) return;
 const last = items[items.length - 1] as Record<string, unknown>;
-const nextId = last[${quote(shape.cursorItemIdField.wire_name)}];
+const nextId = last[${quote(shape.cursorItemIdField.name)}];
 if (nextId === undefined || nextId === null) return;
 pageParams = { ...pageParams, ${shape.cursorIdParam}: nextId } as typeof pageParams;`;
     }
@@ -1225,7 +1366,7 @@ if (!nextUrl) return;
 for await (const item of (async function* (client) {
   let url: string | null | undefined = nextUrl;
   while (url) {
-    const p: any = await client.requestAbsolute(url, options);
+    const p: any = await client.requestAbsolute(url, { ...options${responseTypeOpt} });
     for (const it of (p.${itemsField} ?? [])) yield it;
     url = p.${shape.nextUrlField.name};
   }

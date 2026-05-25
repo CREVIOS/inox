@@ -62,13 +62,13 @@ webhooks:
   timestamp_header: Acme-Timestamp
   tolerance_seconds: 300
   payload_type: WebhookEvent
+environments:
+  production: https://api.acme.test
+  sandbox: https://sandbox.acme.test
 mcp:
   tools: auto
   enable_docs_tool: true
   enable_code_tool: true
-environments:
-  production: https://api.acme.test
-  sandbox: https://sandbox.acme.test
 resources:
   customers:
     model: Customer

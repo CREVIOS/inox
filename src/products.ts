@@ -668,9 +668,53 @@ jobs:
           subject-path: "generated/**/dist/**"
 `;
 
+  // GitHub-App-equivalent sync bot: on a spec change, regenerate each enabled language and
+  // force-push it to that language's production repository (Stainless's GitHub App pushes to
+  // per-language repos; this reproduces it with a fine-grained token + matrix, no app needed).
+  const targets = Object.keys(ir.targets);
+  const matrixInclude = targets
+    .map((target) => `          - { target: ${target}, repo: ${JSON.stringify((ir.targets as Record<string, { repo?: string }>)[target]?.repo ?? "")} }`)
+    .join("\n");
+  const sync = `name: sync-sdks
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths: ["openapi.yaml", "sdkgen.yml"]
+permissions:
+  contents: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+${matrixInclude}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npx sdkgen generate --target \${{ matrix.target }} --no-overlay
+      - name: Push regenerated SDK to its production repository
+        if: \${{ matrix.repo != '' }}
+        env:
+          SDK_SYNC_TOKEN: \${{ secrets.SDK_SYNC_TOKEN }}
+        run: |
+          cd generated/\${{ matrix.target }}
+          git init -q
+          git checkout -q -b main
+          git add -A
+          git -c user.email=bot@sdkgen -c user.name=sdkgen commit -qm "chore: sync \${{ matrix.target }} SDK from spec"
+          git push --force "https://x-access-token:\${SDK_SYNC_TOKEN}@github.com/\${{ matrix.repo }}.git" HEAD:main
+`;
+
   return {
     ".github/workflows/sdks.yml": ci,
     ".github/workflows/regenerate.yml": regenerate,
+    ".github/workflows/sync-sdks.yml": sync,
     ".github/workflows/supply-chain.yml": provenance,
   };
 }

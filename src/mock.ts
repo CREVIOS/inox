@@ -215,7 +215,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 `;
 }
 
-function exampleForRef(ir: ApiIR, ref: TypeRefIR, seen = new Set<string>()): unknown {
+export function exampleForRef(ir: ApiIR, ref: TypeRefIR, seen = new Set<string>()): unknown {
   if (ref.nullable) return null;
   if (ref.kind === "primitive") {
     if (ref.name === "string") return exampleString(ref.format);

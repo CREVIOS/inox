@@ -120,14 +120,51 @@ inox sbom        Write a CycloneDX SBOM per target
 inox studio      Serve the offline Studio web UI
 ```
 
-## Quickstart
+## Install the `inox` CLI
 
 ```bash
-npm install
-npm run sdkgen -- init --force
-npm run sdkgen -- generate --out generated
-npm run sdkgen -- verify  --out generated      # PASS typescript/python/go/java/ruby/csharp
+npm install          # install deps
+npm run build        # compile the generator to dist/
+npm link             # put `inox` on your PATH (or: npx inox ...)
+inox --help
 ```
+
+For development without building, every command is also available via
+`npm run inox -- <cmd>` (runs the TypeScript source through tsx).
+
+## Use it — one spec, any language
+
+```bash
+inox init --force                                   # sample sdkgen.yml + openapi.yaml
+inox generate --out sdk                              # all configured targets
+inox generate --target typescript --out sdk         # or pick one
+inox generate --target go --out sdk
+inox verify --out sdk                                # compiles + conformance, all 6 langs
+```
+
+Then build the generated SDK with the target's own toolchain — each is a normal,
+zero-dependency package:
+
+```bash
+cd sdk/typescript && npm install && npm run build    # tsc
+cd sdk/go         && go build ./...                  # go
+cd sdk/python     && python -m compileall src        # python
+cd sdk/ruby       && ruby -c lib/**/*.rb             # ruby
+cd sdk/java       && javac -d out $(find src -name '*.java')
+cd sdk/csharp     && dotnet build
+```
+
+## Continuous integration
+
+[`/.github/workflows/ci.yml`](.github/workflows/ci.yml) sets up all six toolchains
+(Node, Python, Go, Java, Ruby, .NET) and runs `npm run check`, the governance lint,
+and the full end-to-end generate-and-verify across every language on each push and PR.
+[`/.github/workflows/pages.yml`](.github/workflows/pages.yml) deploys the landing
+site to GitHub Pages on every push to `main`.
+
+## License
+
+MIT.
 
 ## Continuous integration
 

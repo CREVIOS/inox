@@ -18,6 +18,7 @@ import { planRelease, renderChangelogEntry } from "./release.js";
 import { governanceDiagnostics } from "./governance.js";
 import { renderDocs } from "./products.js";
 import { operationInputSchema, typeRefToJsonSchema } from "./jsonschema.js";
+import { applyConfiguredOverlays } from "./transforms.js";
 import type { ApiIR, Diagnostic, OperationIR, TargetName } from "./types.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -71,12 +72,13 @@ async function loadProject(configPath: string): Promise<{ ir: ApiIR; diagnostics
   const loadedConfig = await readConfig(configPath);
   const specPath = resolveSpecPath(loadedConfig.config, loadedConfig.path);
   const loadedSpec = await readOpenApiSpec(specPath);
+  const overlayDiagnostics = await applyConfiguredOverlays(loadedSpec.spec, loadedConfig.config, loadedConfig.path);
   const ir = buildIR({
     config: loadedConfig.config,
     configRaw: loadedConfig.raw,
     spec: loadedSpec.spec,
     specRaw: loadedSpec.raw,
-    diagnostics: [...loadedConfig.diagnostics, ...loadedSpec.diagnostics],
+    diagnostics: [...loadedConfig.diagnostics, ...loadedSpec.diagnostics, ...overlayDiagnostics],
   });
   return {
     ir,

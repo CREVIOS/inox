@@ -1,15 +1,20 @@
 {
-  "name": "sdk-generation-platform",
+  "name": "inox",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
+    "inox": "./dist/src/cli.js",
     "sdkgen": "./dist/src/cli.js"
   },
+  "files": [
+    "dist/src"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx tests/e2e.test.ts",
+    "inox": "tsx src/cli.ts",
     "sdkgen": "tsx src/cli.ts"
   },
   "dependencies": {

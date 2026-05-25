@@ -1,0 +1,24 @@
+sdkgen: 1
+organization:
+  name: swagger
+project:
+  name: petstore
+  display_name: Swagger Petstore
+spec:
+  path: ./petstore.json
+targets:
+  typescript:
+    package_name: "@inox-demo/petstore"
+    edition: typescript.2026-05-25
+  python:
+    package_name: petstore_inox
+    project_name: petstore-inox
+    edition: python.2026-05-25
+  go:
+    module_path: github.com/inox-demo/petstore-go
+    edition: go.2026-05-25
+client:
+  class_name: Petstore
+  env_prefix: PETSTORE
+  base_url:
+    default: https://petstore3.swagger.io/api/v3

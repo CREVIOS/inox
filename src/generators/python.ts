@@ -813,11 +813,13 @@ from typing import ${typingImports.join(", ")}
 ${importLines.join("\n")}
 
 `;
-  // A field whose name is a Python keyword or not a valid identifier (e.g. Stripe's `in`)
+  // TypedDict keys are the spec wire names: responses are returned as raw dicts keyed by
+  // wire name and request bodies are sent verbatim, so the typed surface must match the wire.
+  // A wire name that is a Python keyword or not a valid identifier (e.g. Stripe's `in`)
   // can't use class syntax; emit the functional TypedDict form, which takes string keys.
-  if (type.fields.some((field) => !isSafePyIdentifier(field.name))) {
+  if (type.fields.some((field) => !isSafePyIdentifier(field.wire_name))) {
     const entries = type.fields
-      .map((field) => `    ${JSON.stringify(field.name)}: ${pythonFieldType(ir, field)},`)
+      .map((field) => `    ${JSON.stringify(field.wire_name)}: ${pythonFieldType(ir, field)},`)
       .join("\n");
     return `${header}
 ${type.name} = TypedDict(
@@ -852,7 +854,8 @@ function pythonFieldType(ir: ApiIR, field: FieldIR): string {
 }
 
 function renderPythonField(ir: ApiIR, field: FieldIR): string {
-  return `${field.name}: ${pythonFieldType(ir, field)}`;
+  // Wire name, not camelCase: the runtime dict is keyed by the spec name (see renderPythonObject).
+  return `${field.wire_name}: ${pythonFieldType(ir, field)}`;
 }
 
 function renderPythonResource(ir: ApiIR, resource: ResourceIR): string {

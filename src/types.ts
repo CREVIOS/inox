@@ -11,6 +11,8 @@ export interface SdkConfig {
   };
   spec: {
     path: string;
+    /** OpenAPI Overlay documents (overlay 1.0.0) applied to the spec before IR build. */
+    overlays?: string[];
   };
   targets: Partial<Record<TargetName, TargetConfig>>;
   client?: {
