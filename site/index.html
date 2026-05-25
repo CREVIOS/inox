@@ -133,9 +133,10 @@
   @media(max-width:760px){.titleblock{grid-template-columns:1fr 1fr}.titleblock>div:nth-child(1){grid-column:1/-1;border-right:0;border-bottom:1.5px solid var(--ink)}}
   .foot2{padding:18px 0 64px;text-align:center;color:var(--ink2);font-family:var(--mono);font-size:11.5px}
 
-  /* load reveal */
-  .rise{opacity:0;transform:translateY(16px);transition:opacity .7s cubic-bezier(.2,.7,.2,1),transform .7s cubic-bezier(.2,.7,.2,1)}
-  .rise.in{opacity:1;transform:none}
+  /* load-in — always ends visible (no permanent hiding); off for reduced motion */
+  @keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+  .rise{animation:rise .7s cubic-bezier(.2,.7,.2,1) both}
+  @media(prefers-reduced-motion:reduce){.rise{animation:none}}
 </style>
 </head>
 <body>
@@ -303,9 +304,6 @@ node out/mcp/dist/server.js --tools typed --scope read   <span class="c-cmt"># 1
   const apis=["Stripe","OpenAI","DigitalOcean","Plaid","Box","Asana","Discord","Twilio","Adyen","Ory","SendGrid","GitHub"];
   const seg=apis.map(a=>`<span><b>▸</b> ${a}</span>`).join("");
   document.getElementById('tick').innerHTML=seg+seg;
-  // reveal on scroll
-  const io=new IntersectionObserver((es)=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.1});
-  document.querySelectorAll('.rise').forEach(el=>io.observe(el));
 </script>
 </body>
 </html>
