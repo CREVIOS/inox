@@ -194,6 +194,12 @@
   @media(prefers-reduced-motion:reduce){.ticker .t{animation:none}}
 
   /* title block footer */
+  #progress{position:fixed;top:0;left:0;height:3px;width:0;background:var(--grad);z-index:60;transition:width .08s linear}
+  .prewrap{position:relative}
+  .copybtn{position:absolute;top:8px;right:8px;font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.04em;
+    border:1.5px solid var(--ink);background:var(--paper);color:var(--ink);padding:3px 8px;cursor:pointer;opacity:0;transition:opacity .15s,background .15s,color .15s;z-index:2}
+  .prewrap:hover .copybtn{opacity:1}
+  .copybtn:hover{background:var(--ink);color:var(--paper)} .copybtn.ok{background:#1f8f4e;color:#fff;border-color:#1f8f4e;opacity:1}
   footer{padding:0}
   .titleblock{display:grid;grid-template-columns:2fr 1fr 1fr;border-top:0}
   .titleblock>div{padding:16px 18px;border-right:1.5px solid var(--ink)}
@@ -210,6 +216,7 @@
 </style>
 </head>
 <body>
+<div id="progress"></div>
 <header>
   <div class="hrow">
     <a class="brand" href="#top"><img src="../assets/inox-icon.png" alt="">Inox</a>
@@ -405,6 +412,20 @@ node out/mcp/dist/server.js --tools typed --scope read   <span class="c-cmt"># 1
   const apis=["Stripe","OpenAI","DigitalOcean","Plaid","Box","Asana","Discord","Twilio","Adyen","Ory","SendGrid","GitHub"];
   const seg=apis.map(a=>`<span><b>▸</b> ${a}</span>`).join("");
   document.getElementById('tick').innerHTML=seg+seg;
+
+  // scroll progress bar
+  const prog=document.getElementById('progress');
+  const onScroll=()=>{const h=document.documentElement,max=h.scrollHeight-h.clientHeight;prog.style.width=(max>0?(h.scrollTop/max)*100:0)+'%';};
+  document.addEventListener('scroll',onScroll,{passive:true});onScroll();
+
+  // copy buttons on code windows
+  document.querySelectorAll('.win pre, pre').forEach(pre=>{
+    if(pre.closest('.prewrap'))return;
+    const wrap=document.createElement('div');wrap.className='prewrap';
+    pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);
+    const btn=document.createElement('button');btn.className='copybtn';btn.textContent='copy';wrap.appendChild(btn);
+    btn.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(pre.innerText);btn.textContent='copied';btn.classList.add('ok');setTimeout(()=>{btn.textContent='copy';btn.classList.remove('ok');},1400);}catch{}});
+  });
 </script>
 </body>
 </html>
