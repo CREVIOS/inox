@@ -1,6 +1,8 @@
 <p align="center">
-  <img src="assets/inox-lockup.png" alt="Inox" width="380">
+  <img src="assets/inox-hero.png" alt="Inox — one spec, every SDK" width="860">
 </p>
+
+<h1 align="center">Inox</h1>
 
 <p align="center"><b>One spec, every SDK.</b><br>
 Point Inox at your OpenAPI spec and get idiomatic SDKs in six languages, an MCP
@@ -8,7 +10,16 @@ server, and a CLI — self-hosted, air-gapped, zero runtime dependencies, verifi
 on every build.</p>
 
 <p align="center">
-<code>TypeScript</code> · <code>Python</code> · <code>Go</code> · <code>Java</code> · <code>Ruby</code> · <code>C#</code>
+  <a href="https://github.com/CREVIOS/inox/actions/workflows/ci.yml"><img src="https://github.com/CREVIOS/inox/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crevios.github.io/inox/"><img src="https://github.com/CREVIOS/inox/actions/workflows/pages.yml/badge.svg" alt="Deploy"></a>
+  <img src="https://img.shields.io/badge/license-MIT-6d5efc" alt="MIT">
+  <img src="https://img.shields.io/badge/runtime%20deps-0-1fc7e6" alt="Zero dependencies">
+  <img src="https://img.shields.io/badge/real%20specs-11%2F12%20clean-16a34a" alt="11 of 12 specs compile clean">
+</p>
+
+<p align="center">
+  <a href="https://crevios.github.io/inox/"><b>Live site →</b></a> &nbsp;·&nbsp;
+  <code>TypeScript</code> · <code>Python</code> · <code>Go</code> · <code>Java</code> · <code>Ruby</code> · <code>C#</code>
 </p>
 
 ---
@@ -37,11 +48,11 @@ spec. You declare only package names, the base URL, and the auth scheme.
 
 ### Tested on real, public specs
 
-Each row below is a public OpenAPI spec → minimal config → generated TypeScript
-SDK → `tsc --noEmit`. **11 of 12 compile with zero errors**, no per-spec tuning.
+Each row is a public OpenAPI spec → minimal config → generated TypeScript SDK →
+`tsc --noEmit`. **11 of 12 compile with zero errors**, no per-spec tuning.
 
-| API | Operations | Types | TS files | tsc errors |
-|---|---:|---:|---:|---:|
+| API | Operations | Types | TS files | `tsc` |
+|---|---:|---:|---:|:---:|
 | Stripe | 587 | 11,275 | 11,356 | ✅ 0 |
 | OpenAI | 242 | 3,119 | 3,160 | ✅ 0 |
 | DigitalOcean | 632 | — | 55 | ✅ 0 |
@@ -64,7 +75,7 @@ node out/mcp/dist/server.js --tools typed --scope read   # zero-dep MCP server, 
 
 A best-in-class MCP server per API (protocol 2025-06-18): **typed / dynamic / code**
 tool modes (auto-picked by API size), HTTP-verb-derived annotations
-(`readOnlyHint`/`destructiveHint`), stdio + streamable-HTTP transports, OAuth from
+(`readOnlyHint` / `destructiveHint`), stdio + streamable-HTTP transports, OAuth from
 config, and least-privilege flags. The generator itself also runs as an MCP server
 (`inox mcp`) so agents can drive generation.
 
@@ -117,6 +128,14 @@ npm run sdkgen -- init --force
 npm run sdkgen -- generate --out generated
 npm run sdkgen -- verify  --out generated      # PASS typescript/python/go/java/ruby/csharp
 ```
+
+## Continuous integration
+
+[`/.github/workflows/ci.yml`](.github/workflows/ci.yml) sets up all six toolchains
+(Node, Python, Go, Java, Ruby, .NET) and runs `npm run check`, the governance lint,
+and the full end-to-end generate-and-verify across every language on each push and PR.
+[`/.github/workflows/pages.yml`](.github/workflows/pages.yml) deploys the landing
+site to GitHub Pages on every push to `main`.
 
 ## License
 
