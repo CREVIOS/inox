@@ -166,10 +166,80 @@ function renderRubyClient(ir: ApiIR, mod: string): string {
       @oauth2_token_url = ${quote(oauth.token_url)}
       @oauth2_scopes = ${JSON.stringify(oauth.scopes)}
       @oauth2_auth_style = ${quote(oauth.auth_style)}
+      @oauth2_authorization_url = ${oauth.authorization_url ? quote(oauth.authorization_url) : "nil"}
+      @oauth2_device_url = ${oauth.device_authorization_url ? quote(oauth.device_authorization_url) : "nil"}
       @cached_token = nil
       @token_expiry = 0
 `
     : "      @client_id = nil\n      @client_secret = nil\n";
+
+  const oauthFlowMethods = oauth && (oauth.authorization_url || oauth.device_authorization_url)
+    ? `    public
+${oauth.authorization_url ? `
+    def authorization_url(redirect_uri, state: nil, scopes: nil)
+      base = @oauth2_authorization_url.start_with?("http") ? @oauth2_authorization_url : "#{@base_url}#{@oauth2_authorization_url}"
+      params = { "response_type" => "code", "redirect_uri" => redirect_uri }
+      params["client_id"] = @client_id if @client_id
+      chosen = scopes.nil? ? @oauth2_scopes : scopes
+      params["scope"] = chosen.join(" ") unless chosen.empty?
+      params["state"] = state if state
+      sep = base.include?("?") ? "&" : "?"
+      base + sep + URI.encode_www_form(params)
+    end
+
+    def exchange_code(code, redirect_uri)
+      oauth_token_request({ "grant_type" => "authorization_code", "code" => code, "redirect_uri" => redirect_uri })
+    end
+` : ""}${oauth.device_authorization_url ? `
+    def request_device_code
+      device_url = @oauth2_device_url.start_with?("http") ? @oauth2_device_url : "#{@base_url}#{@oauth2_device_url}"
+      form = {}
+      form["client_id"] = @client_id if @client_id
+      form["scope"] = @oauth2_scopes.join(" ") unless @oauth2_scopes.empty?
+      uri = URI(device_url)
+      req = Net::HTTP::Post.new(uri)
+      req["content-type"] = "application/x-www-form-urlencoded"
+      req["accept"] = "application/json"
+      req.body = URI.encode_www_form(form)
+      response = http_for(uri).request(req)
+      raise ApiError.new(response.code.to_i, response.body) unless response.code.to_i.between?(200, 299)
+      JSON.parse(response.body)
+    end
+
+    def poll_device_token(device_code, interval: 5)
+      loop do
+        begin
+          return oauth_token_request({ "grant_type" => "urn:ietf:params:oauth:grant-type:device_code", "device_code" => device_code })
+        rescue ApiError => e
+          parsed = (JSON.parse(e.body) rescue {})
+          if ["authorization_pending", "slow_down"].include?(parsed["error"])
+            sleep(interval)
+            next
+          end
+          raise
+        end
+      end
+    end
+` : ""}${oauth.authorization_url || oauth.device_authorization_url ? `
+    def oauth_token_request(extra)
+      token_url = @oauth2_token_url.start_with?("http") ? @oauth2_token_url : "#{@base_url}#{@oauth2_token_url}"
+      form = extra.dup
+      form["client_id"] = @client_id if @client_id
+      form["client_secret"] = @client_secret if @client_secret
+      uri = URI(token_url)
+      req = Net::HTTP::Post.new(uri)
+      req["content-type"] = "application/x-www-form-urlencoded"
+      req["accept"] = "application/json"
+      req.body = URI.encode_www_form(form)
+      response = http_for(uri).request(req)
+      raise ApiError.new(response.code.to_i, response.body) unless response.code.to_i.between?(200, 299)
+      payload = JSON.parse(response.body)
+      @cached_token = payload["access_token"]
+      @token_expiry = Time.now.to_f + (payload.fetch("expires_in", 3600) - 30)
+      payload["access_token"]
+    end
+` : ""}`
+    : "";
 
   const tokenMethod = oauth
     ? `
@@ -238,7 +308,7 @@ ${basic ? `      @basic_user = username || ENV[${quote(basic.username_env ?? `${
 ${oauthInit}${webhookInit}${resourceInit}
     end
 
-    def request(method, path, query: nil, body: nil, headers: nil, multipart: false, idempotency_key: nil, timeout: nil, max_retries: nil, binary: false)
+    def request(method, path, query: nil, body: nil, headers: nil, multipart: false, form_urlencoded: false, text_plain: false, idempotency_key: nil, timeout: nil, max_retries: nil, binary: false)
       effective_retries = max_retries || @max_retries
       effective_timeout = timeout || @timeout
       uri = URI("#{@base_url}#{path}")
@@ -252,6 +322,12 @@ ${oauthInit}${webhookInit}${resourceInit}
         boundary = "----sdkgen#{SecureRandom.hex(16)}"
         data = encode_multipart(body, boundary)
         req_headers["content-type"] = "multipart/form-data; boundary=#{boundary}"
+      elsif form_urlencoded && body.is_a?(Hash)
+        req_headers["content-type"] = "application/x-www-form-urlencoded"
+        data = encode_form(body)
+      elsif text_plain && !body.nil?
+        req_headers["content-type"] = "text/plain"
+        data = body.is_a?(String) ? body : body.to_s
       elsif !body.nil?
         req_headers["content-type"] = "application/json"
         data = JSON.generate(body)
@@ -399,6 +475,22 @@ ${basic ? `      if (bearer.nil? || bearer.to_s.empty?) && @basic_user && !@basi
       [8.0, 0.5 * (2**attempt)].min * (0.75 + rand * 0.5)
     end
 
+    def encode_form(body)
+      pairs = []
+      add = lambda do |key, value|
+        next if value.nil?
+        if value.is_a?(Array)
+          value.each_with_index { |v, i| add.call("#{key}[#{i}]", v) }
+        elsif value.is_a?(Hash)
+          value.each { |k, v| add.call("#{key}[#{k}]", v) }
+        else
+          pairs << [key, value.to_s]
+        end
+      end
+      body.each { |k, v| add.call(k.to_s, v) }
+      URI.encode_www_form(pairs)
+    end
+
     def encode_multipart(fields, boundary)
       body = +""
       fields.each do |key, value|
@@ -421,6 +513,7 @@ ${basic ? `      if (bearer.nil? || bearer.to_s.empty?) && @basic_user && !@basi
       body
     end
 ${tokenMethod.split("\n").map((line) => (line ? `  ${line}` : line)).join("\n")}
+${oauthFlowMethods.split("\n").map((line) => (line ? `  ${line}` : line)).join("\n")}
   end
 end
 `;
@@ -638,7 +731,13 @@ function renderRubyMethod(ir: ApiIR, mod: string, operation: OperationIR, mode: 
       ? `body: body.merge(${quote(discriminator)} => false)`
       : "body: body"
     : "";
-  const multipart = operation.request?.multipart ? ", multipart: true" : "";
+  const multipart = operation.request?.multipart
+    ? ", multipart: true"
+    : operation.request?.form_urlencoded
+      ? ", form_urlencoded: true"
+      : operation.request?.text_plain
+        ? ", text_plain: true"
+        : "";
   const binary = operation.binary_response ? ", binary: true" : "";
   const callArgs = [
     `query: ${rbQueryHash(plan)}`,

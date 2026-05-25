@@ -126,6 +126,10 @@ export interface AuthConfig {
     client_id_env?: string;
     client_secret_env?: string;
     security_scheme?: string;
+    /** authorization-code flow: the authorize endpoint (enables authorizationUrl/exchangeCode). */
+    authorization_url?: string;
+    /** device flow: the device-authorization endpoint (enables requestDeviceCode/pollDeviceToken). */
+    device_authorization_url?: string;
   };
 }
 
@@ -135,6 +139,10 @@ export interface OAuth2IR {
   auth_style: "post" | "basic";
   client_id_env: string;
   client_secret_env: string;
+  /** authorization-code flow endpoint (optional). */
+  authorization_url?: string;
+  /** device-authorization flow endpoint (optional). */
+  device_authorization_url?: string;
 }
 
 export interface ResourceConfig {

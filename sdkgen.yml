@@ -45,6 +45,8 @@ client:
       auth_style: post
       client_id_env: ACME_CLIENT_ID
       client_secret_env: ACME_CLIENT_SECRET
+      authorization_url: /oauth/authorize
+      device_authorization_url: /oauth/device
   retries:
     max_retries: 2
     retry_statuses:

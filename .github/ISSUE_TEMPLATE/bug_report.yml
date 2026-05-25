@@ -1,0 +1,39 @@
+name: Bug report
+description: A generated SDK doesn't compile, or the generator misbehaves
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target language
+      options: [typescript, python, go, java, ruby, csharp, all]
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: OpenAPI spec snippet (or link)
+      description: The smallest spec fragment that reproduces it.
+      render: yaml
+  - type: textarea
+    id: config
+    attributes:
+      label: sdkgen.yml
+      render: yaml
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Inox version
+      placeholder: "0.1.0 (npx @crevious/inox --version)"

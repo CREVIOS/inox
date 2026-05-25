@@ -97,12 +97,77 @@ function renderPythonClient(ir: ApiIR): string {
         self.oauth2_token_url = ${quote(oauth.token_url)}
         self.oauth2_scopes = ${JSON.stringify(oauth.scopes)}
         self.oauth2_auth_style = ${quote(oauth.auth_style)}
+        self.oauth2_authorization_url = ${oauth.authorization_url ? quote(oauth.authorization_url) : "None"}
+        self.oauth2_device_url = ${oauth.device_authorization_url ? quote(oauth.device_authorization_url) : "None"}
         self._cached_token: str | None = None
         self._token_expiry = 0.0
 `
     : `        self.client_id = None
         self.client_secret = None
 `;
+  const oauthFlowMethods = oauth
+    ? `${oauth.authorization_url ? `
+    def authorization_url(self, redirect_uri: str, state: str | None = None, scopes: list[str] | None = None) -> str:
+        base = self.oauth2_authorization_url if self.oauth2_authorization_url.startswith("http") else self.base_url + self.oauth2_authorization_url
+        params = {"response_type": "code", "redirect_uri": redirect_uri}
+        if self.client_id:
+            params["client_id"] = self.client_id
+        chosen = scopes if scopes is not None else self.oauth2_scopes
+        if chosen:
+            params["scope"] = " ".join(chosen)
+        if state:
+            params["state"] = state
+        sep = "&" if "?" in base else "?"
+        return base + sep + urllib.parse.urlencode(params)
+
+    def exchange_code(self, code: str, redirect_uri: str) -> str:
+        return self._oauth_token_request({"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri})
+` : ""}${oauth.device_authorization_url ? `
+    def request_device_code(self) -> dict:
+        url = self.oauth2_device_url if self.oauth2_device_url.startswith("http") else self.base_url + self.oauth2_device_url
+        params = {}
+        if self.client_id:
+            params["client_id"] = self.client_id
+        if self.oauth2_scopes:
+            params["scope"] = " ".join(self.oauth2_scopes)
+        req = urllib.request.Request(url, data=urllib.parse.urlencode(params).encode("utf-8"), method="POST", headers={"content-type": "application/x-www-form-urlencoded", "accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def poll_device_token(self, device_code: str, interval: float = 5) -> str:
+        while True:
+            try:
+                return self._oauth_token_request({"grant_type": "urn:ietf:params:oauth:grant-type:device_code", "device_code": device_code})
+            except ApiError as err:
+                code = err.body.get("error") if isinstance(err.body, dict) else None
+                if code in ("authorization_pending", "slow_down"):
+                    time.sleep(interval)
+                    continue
+                raise
+` : ""}${oauth.authorization_url || oauth.device_authorization_url ? `
+    def _oauth_token_request(self, extra: dict) -> str:
+        token_url = self.oauth2_token_url if self.oauth2_token_url.startswith("http") else self.base_url + self.oauth2_token_url
+        params = dict(extra)
+        if self.client_id:
+            params["client_id"] = self.client_id
+        if self.client_secret:
+            params["client_secret"] = self.client_secret
+        req = urllib.request.Request(token_url, data=urllib.parse.urlencode(params).encode("utf-8"), method="POST", headers={"content-type": "application/x-www-form-urlencoded", "accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as http_err:
+            raw = http_err.read().decode("utf-8")
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = raw
+            raise ApiError(http_err.code, parsed) from None
+        self._cached_token = payload["access_token"]
+        self._token_expiry = time.time() + (payload.get("expires_in", 3600) - 30)
+        return payload["access_token"]
+` : ""}`
+    : "";
   const oauthMethods = oauth
     ? `
     def _get_token(self, force: bool = False) -> str | None:
@@ -223,7 +288,7 @@ ${oauthInit}${basicInit}${webhookAssignment}
         elif self._basic_auth:
             headers["authorization"] = self._basic_auth
         return headers
-${oauthMethods}
+${oauthMethods}${oauthFlowMethods}
 
     def request(
         self,

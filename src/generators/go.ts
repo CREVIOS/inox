@@ -61,6 +61,165 @@ async function formatGoFiles(outDir: string, files: string[]): Promise<void> {
   }
 }
 
+function renderGoOauthFlows(oauth: ApiIR["client"]["oauth2"]): string {
+  if (!oauth || (!oauth.authorization_url && !oauth.device_authorization_url)) return "";
+  const tokenPost = `
+// oauthTokenRequest posts a form grant to the token endpoint and caches the resulting bearer.
+func (client *Client) oauthTokenRequest(ctx context.Context, form url.Values) (string, error) {
+\ttokenURL := client.oauth2TokenURL
+\tif !strings.HasPrefix(tokenURL, "http") {
+\t\ttokenURL = client.baseURL + tokenURL
+\t}
+\tif client.clientID != "" {
+\t\tform.Set("client_id", client.clientID)
+\t}
+\tif client.clientSecret != "" {
+\t\tform.Set("client_secret", client.clientSecret)
+\t}
+\trequest, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(form.Encode()))
+\tif err != nil {
+\t\treturn "", err
+\t}
+\trequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+\trequest.Header.Set("Accept", "application/json")
+\tresponse, err := client.httpClient.Do(request)
+\tif err != nil {
+\t\treturn "", err
+\t}
+\tbody, _ := io.ReadAll(response.Body)
+\tresponse.Body.Close()
+\tif response.StatusCode < 200 || response.StatusCode >= 300 {
+\t\treturn "", &APIError{StatusCode: response.StatusCode, Body: body}
+\t}
+\tvar payload struct {
+\t\tAccessToken string \`json:"access_token"\`
+\t\tExpiresIn   int64  \`json:"expires_in"\`
+\t}
+\tif err := json.Unmarshal(body, &payload); err != nil {
+\t\treturn "", err
+\t}
+\tclient.cachedToken = payload.AccessToken
+\texpires := payload.ExpiresIn
+\tif expires == 0 {
+\t\texpires = 3600
+\t}
+\tclient.tokenExpiry = time.Now().Add(time.Duration(expires-30) * time.Second)
+\treturn payload.AccessToken, nil
+}
+`;
+  const authCode = oauth.authorization_url
+    ? `
+// AuthorizationURL builds the OAuth2 authorization-code consent URL.
+func (client *Client) AuthorizationURL(redirectURI string, state string, scopes []string) string {
+\tbase := client.oauth2AuthURL
+\tif !strings.HasPrefix(base, "http") {
+\t\tbase = client.baseURL + base
+\t}
+\tparams := url.Values{}
+\tparams.Set("response_type", "code")
+\tif client.clientID != "" {
+\t\tparams.Set("client_id", client.clientID)
+\t}
+\tparams.Set("redirect_uri", redirectURI)
+\tchosen := scopes
+\tif chosen == nil {
+\t\tchosen = client.oauth2Scopes
+\t}
+\tif len(chosen) > 0 {
+\t\tparams.Set("scope", strings.Join(chosen, " "))
+\t}
+\tif state != "" {
+\t\tparams.Set("state", state)
+\t}
+\tsep := "?"
+\tif strings.Contains(base, "?") {
+\t\tsep = "&"
+\t}
+\treturn base + sep + params.Encode()
+}
+
+// ExchangeCode exchanges an authorization code for an access token.
+func (client *Client) ExchangeCode(ctx context.Context, code string, redirectURI string) (string, error) {
+\tform := url.Values{}
+\tform.Set("grant_type", "authorization_code")
+\tform.Set("code", code)
+\tform.Set("redirect_uri", redirectURI)
+\treturn client.oauthTokenRequest(ctx, form)
+}
+`
+    : "";
+  const device = oauth.device_authorization_url
+    ? `
+// DeviceCode is the response of the device-authorization endpoint.
+type DeviceCode struct {
+\tDeviceCode      string \`json:"device_code"\`
+\tUserCode        string \`json:"user_code"\`
+\tVerificationURI string \`json:"verification_uri"\`
+\tInterval        int64  \`json:"interval"\`
+\tExpiresIn       int64  \`json:"expires_in"\`
+}
+
+// RequestDeviceCode starts the OAuth2 device flow.
+func (client *Client) RequestDeviceCode(ctx context.Context) (*DeviceCode, error) {
+\tdeviceURL := client.oauth2DeviceURL
+\tif !strings.HasPrefix(deviceURL, "http") {
+\t\tdeviceURL = client.baseURL + deviceURL
+\t}
+\tform := url.Values{}
+\tif client.clientID != "" {
+\t\tform.Set("client_id", client.clientID)
+\t}
+\tif len(client.oauth2Scopes) > 0 {
+\t\tform.Set("scope", strings.Join(client.oauth2Scopes, " "))
+\t}
+\trequest, err := http.NewRequestWithContext(ctx, "POST", deviceURL, strings.NewReader(form.Encode()))
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\trequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+\trequest.Header.Set("Accept", "application/json")
+\tresponse, err := client.httpClient.Do(request)
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tbody, _ := io.ReadAll(response.Body)
+\tresponse.Body.Close()
+\tif response.StatusCode < 200 || response.StatusCode >= 300 {
+\t\treturn nil, &APIError{StatusCode: response.StatusCode, Body: body}
+\t}
+\tvar out DeviceCode
+\tif err := json.Unmarshal(body, &out); err != nil {
+\t\treturn nil, err
+\t}
+\treturn &out, nil
+}
+
+// PollDeviceToken polls the token endpoint until the user authorizes the device.
+func (client *Client) PollDeviceToken(ctx context.Context, deviceCode string, intervalSeconds int) (string, error) {
+\tif intervalSeconds <= 0 {
+\t\tintervalSeconds = 5
+\t}
+\tfor {
+\t\tform := url.Values{}
+\t\tform.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+\t\tform.Set("device_code", deviceCode)
+\t\ttoken, err := client.oauthTokenRequest(ctx, form)
+\t\tif err == nil {
+\t\t\treturn token, nil
+\t\t}
+\t\tapiErr, ok := err.(*APIError)
+\t\tif ok && (bytes.Contains(apiErr.Body, []byte("authorization_pending")) || bytes.Contains(apiErr.Body, []byte("slow_down"))) {
+\t\t\ttime.Sleep(time.Duration(intervalSeconds) * time.Second)
+\t\t\tcontinue
+\t\t}
+\t\treturn "", err
+\t}
+}
+`
+    : "";
+  return tokenPost + authCode + device;
+}
+
 function renderGoClient(ir: ApiIR, packageName: string): string {
   const resources = topLevelResources(ir, "go");
   const resourceFields = resources.map((resource) => `\t${resource.class_name} *${resource.class_name}Service`).join("\n");
@@ -78,7 +237,9 @@ function renderGoClient(ir: ApiIR, packageName: string): string {
 \t\tclientSecret: os.Getenv(${quote(oauth.client_secret_env)}),
 \t\toauth2TokenURL: ${quote(oauth.token_url)},
 \t\toauth2Scopes: []string{${oauth.scopes.map((scope) => quote(scope)).join(", ")}},
-\t\toauth2AuthStyle: ${quote(oauth.auth_style)},`
+\t\toauth2AuthStyle: ${quote(oauth.auth_style)},
+\t\toauth2AuthURL: ${quote(oauth.authorization_url ?? "")},
+\t\toauth2DeviceURL: ${quote(oauth.device_authorization_url ?? "")},`
     : "";
   const webhookOption = ir.webhooks
     ? `
@@ -107,6 +268,7 @@ func WithBasicAuth(username, password string) ClientOption {
 }
 `
     : "";
+  const oauthFlowMethods = renderGoOauthFlows(oauth);
   return `package ${packageName}
 
 import (
@@ -141,6 +303,8 @@ type Client struct {
 \toauth2TokenURL string
 \toauth2Scopes []string
 \toauth2AuthStyle string
+\toauth2AuthURL string
+\toauth2DeviceURL string
 \tcachedToken string
 \ttokenExpiry time.Time
 \tonRequest func(map[string]any)
@@ -347,7 +511,7 @@ func (client *Client) accessToken(ctx context.Context, force bool) (string, erro
 \tclient.tokenExpiry = time.Now().Add(time.Duration(expires-30) * time.Second)
 \treturn client.cachedToken, nil
 }
-
+${oauthFlowMethods}
 func (client *Client) authorize(ctx context.Context, request *http.Request) error {
 \tif client.clientID != "" && client.clientSecret != "" {
 \t\ttoken, err := client.accessToken(ctx, false)

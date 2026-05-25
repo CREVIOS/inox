@@ -763,6 +763,8 @@ class IrBuilder {
       auth_style: configured?.auth_style ?? "post",
       client_id_env: configured?.client_id_env ?? `${envPrefix}_CLIENT_ID`,
       client_secret_env: configured?.client_secret_env ?? `${envPrefix}_CLIENT_SECRET`,
+      authorization_url: configured?.authorization_url,
+      device_authorization_url: configured?.device_authorization_url,
     };
   }
 

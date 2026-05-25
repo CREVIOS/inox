@@ -371,6 +371,93 @@ public final class Json {
 `;
 }
 
+function oauthFlowMethods(oauth: ApiIR["client"]["oauth2"]): string {
+  if (!oauth || (!oauth.authorization_url && !oauth.device_authorization_url)) return "";
+  const tokenPost = `
+    @SuppressWarnings("unchecked")
+    private String oauthTokenRequest(Map<String, String> form) throws Exception {
+        String url = oauthTokenUrl.startsWith("http") ? oauthTokenUrl : baseUrl + oauthTokenUrl;
+        if (clientId != null) form.put("client_id", clientId);
+        if (clientSecret != null) form.put("client_secret", clientSecret);
+        List<String> parts = new ArrayList<>();
+        for (Map.Entry<String, String> e : form.entrySet()) parts.add(URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8) + "=" + URLEncoder.encode(e.getValue(), StandardCharsets.UTF_8));
+        HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+            .header("content-type", "application/x-www-form-urlencoded").header("accept", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(String.join("&", parts))).build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw new ApiException(resp.statusCode(), resp.body());
+        Map<String, Object> payload = asMap(Json.parse(resp.body()));
+        cachedToken = (String) payload.get("access_token");
+        long expires = payload.get("expires_in") instanceof Number ? ((Number) payload.get("expires_in")).longValue() : 3600;
+        tokenExpiry = System.currentTimeMillis() / 1000 + expires - 30;
+        return cachedToken;
+    }
+`;
+  const authCode = oauth.authorization_url
+    ? `
+    /** OAuth2 authorization-code flow: build the consent URL. */
+    public String authorizationUrl(String redirectUri, String state, List<String> scopes) {
+        String base = oauthAuthUrl.startsWith("http") ? oauthAuthUrl : baseUrl + oauthAuthUrl;
+        List<String> parts = new ArrayList<>();
+        parts.add("response_type=code");
+        if (clientId != null) parts.add("client_id=" + URLEncoder.encode(clientId, StandardCharsets.UTF_8));
+        parts.add("redirect_uri=" + URLEncoder.encode(redirectUri, StandardCharsets.UTF_8));
+        List<String> chosen = scopes != null ? scopes : oauthScopes;
+        if (!chosen.isEmpty()) parts.add("scope=" + URLEncoder.encode(String.join(" ", chosen), StandardCharsets.UTF_8));
+        if (state != null) parts.add("state=" + URLEncoder.encode(state, StandardCharsets.UTF_8));
+        return base + (base.contains("?") ? "&" : "?") + String.join("&", parts);
+    }
+
+    /** OAuth2 authorization-code flow: exchange the code for an access token. */
+    public String exchangeCode(String code, String redirectUri) throws Exception {
+        Map<String, String> form = new LinkedHashMap<>();
+        form.put("grant_type", "authorization_code");
+        form.put("code", code);
+        form.put("redirect_uri", redirectUri);
+        return oauthTokenRequest(form);
+    }
+`
+    : "";
+  const device = oauth.device_authorization_url
+    ? `
+    /** OAuth2 device flow: request a device + user code. */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> requestDeviceCode() throws Exception {
+        String url = oauthDeviceUrl.startsWith("http") ? oauthDeviceUrl : baseUrl + oauthDeviceUrl;
+        List<String> parts = new ArrayList<>();
+        if (clientId != null) parts.add("client_id=" + URLEncoder.encode(clientId, StandardCharsets.UTF_8));
+        if (!oauthScopes.isEmpty()) parts.add("scope=" + URLEncoder.encode(String.join(" ", oauthScopes), StandardCharsets.UTF_8));
+        HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+            .header("content-type", "application/x-www-form-urlencoded").header("accept", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(String.join("&", parts))).build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) throw new ApiException(resp.statusCode(), resp.body());
+        return asMap(Json.parse(resp.body()));
+    }
+
+    /** OAuth2 device flow: poll the token endpoint until the user authorizes. */
+    public String pollDeviceToken(String deviceCode, int intervalSeconds) throws Exception {
+        if (intervalSeconds <= 0) intervalSeconds = 5;
+        while (true) {
+            try {
+                Map<String, String> form = new LinkedHashMap<>();
+                form.put("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
+                form.put("device_code", deviceCode);
+                return oauthTokenRequest(form);
+            } catch (ApiException e) {
+                if (e.body != null && (e.body.contains("authorization_pending") || e.body.contains("slow_down"))) {
+                    Thread.sleep(intervalSeconds * 1000L);
+                    continue;
+                }
+                throw e;
+            }
+        }
+    }
+`
+    : "";
+  return tokenPost + authCode + device;
+}
+
 function renderJavaClient(ir: ApiIR, pkg: string): string {
   const resources = topLevelResources(ir, "java");
   const oauth = ir.client.oauth2;
@@ -423,6 +510,8 @@ public class Client {
     private final String oauthTokenUrl = ${quote(oauth?.token_url ?? "")};
     private final List<String> oauthScopes = List.of(${(oauth?.scopes ?? []).map((scope) => quote(scope)).join(", ")});
     private final String oauthAuthStyle = ${quote(oauth?.auth_style ?? "post")};
+    private final String oauthAuthUrl = ${quote(oauth?.authorization_url ?? "")};
+    private final String oauthDeviceUrl = ${quote(oauth?.device_authorization_url ?? "")};
     private String cachedToken;
     private long tokenExpiry = 0;
     private final Consumer<Map<String, Object>> onRequest;
@@ -499,7 +588,7 @@ ${basicInit}${webhookInit}${init}
         tokenExpiry = System.currentTimeMillis() / 1000 + expires - 30;
         return cachedToken;
     }
-
+${oauthFlowMethods(oauth)}
     @SuppressWarnings("unchecked")
     public static Map<String, Object> asMap(Object o) { return o instanceof Map ? (Map<String, Object>) o : new LinkedHashMap<>(); }
 
@@ -511,6 +600,26 @@ ${basicInit}${webhookInit}${init}
         if (body instanceof Map) m.putAll((Map<String, Object>) body);
         m.put(key, value);
         return m;
+    }
+
+    // application/x-www-form-urlencoded with bracket notation for nested objects/arrays.
+    static String encodeForm(Map<String, Object> body) {
+        List<String> parts = new ArrayList<>();
+        for (Map.Entry<String, Object> e : body.entrySet()) encodeFormField(e.getKey(), e.getValue(), parts);
+        return String.join("&", parts);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void encodeFormField(String key, Object value, List<String> parts) {
+        if (value == null) return;
+        if (value instanceof Map) {
+            for (Map.Entry<String, Object> e : ((Map<String, Object>) value).entrySet()) encodeFormField(key + "[" + e.getKey() + "]", e.getValue(), parts);
+        } else if (value instanceof List) {
+            List<Object> list = (List<Object>) value;
+            for (int i = 0; i < list.size(); i++) encodeFormField(key + "[" + i + "]", list.get(i), parts);
+        } else {
+            parts.add(URLEncoder.encode(key, StandardCharsets.UTF_8) + "=" + URLEncoder.encode(String.valueOf(value), StandardCharsets.UTF_8));
+        }
     }
 
     private byte[] encodeMultipart(Map<String, Object> fields, String boundary) {
@@ -536,7 +645,7 @@ ${basicInit}${webhookInit}${init}
         return out.toByteArray();
     }
 
-    public Object request(String method, String path, Map<String, Object> query, Object body, boolean multipart, Map<String, String> headers, String idempotencyKey, boolean binary) throws Exception {
+    public Object request(String method, String path, Map<String, Object> query, Object body, String encoding, Map<String, String> headers, String idempotencyKey, boolean binary) throws Exception {
         String url = baseUrl + path + buildQuery(query);
         String bearer = resolveBearer();
         boolean refreshed = false;
@@ -544,9 +653,15 @@ ${basicInit}${webhookInit}${init}
             HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(timeoutSeconds));
             HttpRequest.BodyPublisher pub;
             String boundary = "----sdkgen" + UUID.randomUUID().toString().replace("-", "");
-            if (multipart && body instanceof Map) {
+            if ("multipart".equals(encoding) && body instanceof Map) {
                 b.header("content-type", "multipart/form-data; boundary=" + boundary);
                 pub = HttpRequest.BodyPublishers.ofByteArray(encodeMultipart(asMap(body), boundary));
+            } else if ("form".equals(encoding) && body instanceof Map) {
+                b.header("content-type", "application/x-www-form-urlencoded");
+                pub = HttpRequest.BodyPublishers.ofString(encodeForm(asMap(body)));
+            } else if ("text".equals(encoding) && body != null) {
+                b.header("content-type", "text/plain");
+                pub = HttpRequest.BodyPublishers.ofString(body instanceof String ? (String) body : String.valueOf(body));
             } else if (body != null) {
                 b.header("content-type", "application/json");
                 pub = HttpRequest.BodyPublishers.ofString(Json.stringify(body));
@@ -927,9 +1042,15 @@ function renderJavaMethod(ir: ApiIR, operation: OperationIR, mode: "plain" | "no
   const params = javaParamList(plan, extra);
   const discriminator = mode === "non-stream" ? operation.streaming?.param_discriminator : undefined;
   const bodyArg = operation.request ? (discriminator ? `Client.withField(body, ${quote(discriminator)}, false)` : "body") : "null";
-  const multipart = operation.request?.multipart ? "true" : "false";
+  const encoding = operation.request?.multipart
+    ? "multipart"
+    : operation.request?.form_urlencoded
+      ? "form"
+      : operation.request?.text_plain
+        ? "text"
+        : "json";
   const dep = operation.deprecated ? "    @Deprecated\n" : "";
-  const call = `client.request(${quote(operation.http_method)}, ${plan.pathExpr}, ${javaQueryMap(plan)}, ${bodyArg}, ${multipart}, null, null, ${operation.binary_response ? "true" : "false"})`;
+  const call = `client.request(${quote(operation.http_method)}, ${plan.pathExpr}, ${javaQueryMap(plan)}, ${bodyArg}, ${quote(encoding)}, null, null, ${operation.binary_response ? "true" : "false"})`;
   if (operation.binary_response) {
     return `${dep}    public byte[] ${javaIdent(operation.name)}(${params}) throws Exception {
         return (byte[]) ${call};

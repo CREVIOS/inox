@@ -497,14 +497,42 @@ ${fields.join("\n")}
         scopes: ${JSON.stringify(ir.client.oauth2.scopes)},
         authStyle: ${quote(ir.client.oauth2.auth_style)},
         clientId: options.clientId ?? process.env.${ir.client.oauth2.client_id_env},
-        clientSecret: options.clientSecret ?? process.env.${ir.client.oauth2.client_secret_env},
+        clientSecret: options.clientSecret ?? process.env.${ir.client.oauth2.client_secret_env},${ir.client.oauth2.authorization_url ? `\n        authorizationUrl: ${quote(ir.client.oauth2.authorization_url)},` : ""}${ir.client.oauth2.device_authorization_url ? `\n        deviceAuthorizationUrl: ${quote(ir.client.oauth2.device_authorization_url)},` : ""}
       },`
           : ""
       }
     });
 ${initializers.join("\n")}
   }
-}
+${
+  ir.client.oauth2?.authorization_url
+    ? `
+  /** OAuth2 authorization-code flow: build the consent URL to redirect the user to. */
+  authorizationUrl(redirectUri: string, options: { state?: string; scopes?: string[] } = {}): string {
+    return this._client.authorizationUrl(redirectUri, options);
+  }
+
+  /** OAuth2 authorization-code flow: exchange the returned code for an access token. */
+  exchangeCode(code: string, redirectUri: string): Promise<string> {
+    return this._client.exchangeCode(code, redirectUri);
+  }
+`
+    : ""
+}${
+  ir.client.oauth2?.device_authorization_url
+    ? `
+  /** OAuth2 device flow: request a device + user code. */
+  requestDeviceCode() {
+    return this._client.requestDeviceCode();
+  }
+
+  /** OAuth2 device flow: poll the token endpoint until the user authorizes. */
+  pollDeviceToken(deviceCode: string, intervalSeconds = 5): Promise<string> {
+    return this._client.pollDeviceToken(deviceCode, intervalSeconds);
+  }
+`
+    : ""
+}}
 `;
 }
 
@@ -536,6 +564,17 @@ export interface OAuth2Config {
   authStyle: "post" | "basic";
   clientId?: string;
   clientSecret?: string;
+  authorizationUrl?: string;
+  deviceAuthorizationUrl?: string;
+}
+
+export interface DeviceCodeResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  interval?: number;
+  expires_in?: number;
 }
 
 /** Observability hooks. Wire OpenTelemetry/metrics/logging here; default is no-op (zero deps). */
@@ -779,6 +818,71 @@ export class ApiClient {
   private async resolveBearer(): Promise<string | undefined> {
     if (this.oauth2?.clientId && this.oauth2?.clientSecret) return this.getAccessToken();
     return this.apiKey;
+  }
+
+  /** OAuth2 authorization-code flow: build the URL to send the user to for consent. */
+  authorizationUrl(redirectUri: string, options: { state?: string; scopes?: string[] } = {}): string {
+    if (!this.oauth2?.authorizationUrl) throw new ApiError(0, "authorization_url is not configured");
+    const base = this.oauth2.authorizationUrl.startsWith("http") ? this.oauth2.authorizationUrl : \`\${this.baseUrl}\${this.oauth2.authorizationUrl}\`;
+    const url = new URL(base);
+    url.searchParams.set("response_type", "code");
+    if (this.oauth2.clientId) url.searchParams.set("client_id", this.oauth2.clientId);
+    url.searchParams.set("redirect_uri", redirectUri);
+    const scopes = options.scopes ?? this.oauth2.scopes;
+    if (scopes.length) url.searchParams.set("scope", scopes.join(" "));
+    if (options.state) url.searchParams.set("state", options.state);
+    return url.toString();
+  }
+
+  /** OAuth2 authorization-code flow: exchange the returned code for an access token (cached as the bearer). */
+  async exchangeCode(code: string, redirectUri: string): Promise<string> {
+    return this.oauthTokenRequest({ grant_type: "authorization_code", code, redirect_uri: redirectUri });
+  }
+
+  /** OAuth2 device flow: request a device + user code from the authorization server. */
+  async requestDeviceCode(): Promise<DeviceCodeResponse> {
+    if (!this.oauth2?.deviceAuthorizationUrl) throw new ApiError(0, "device_authorization_url is not configured");
+    const url = this.oauth2.deviceAuthorizationUrl.startsWith("http") ? this.oauth2.deviceAuthorizationUrl : \`\${this.baseUrl}\${this.oauth2.deviceAuthorizationUrl}\`;
+    const params = new URLSearchParams();
+    if (this.oauth2.clientId) params.set("client_id", this.oauth2.clientId);
+    if (this.oauth2.scopes.length) params.set("scope", this.oauth2.scopes.join(" "));
+    const response = await fetch(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body: params.toString() });
+    if (!response.ok) throw new ApiError(response.status, await response.text());
+    return (await response.json()) as DeviceCodeResponse;
+  }
+
+  /** OAuth2 device flow: poll the token endpoint until the user authorizes (or it errors). */
+  async pollDeviceToken(deviceCode: string, intervalSeconds = 5): Promise<string> {
+    for (;;) {
+      try {
+        return await this.oauthTokenRequest({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: deviceCode });
+      } catch (error) {
+        const body = error instanceof ApiError ? error.body : undefined;
+        const code = body && typeof body === "object" ? (body as Record<string, unknown>).error : undefined;
+        if (code === "authorization_pending" || code === "slow_down") {
+          await sleep(intervalSeconds * 1000);
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async oauthTokenRequest(extra: Record<string, string>): Promise<string> {
+    const tokenUrl = this.oauth2!.tokenUrl.startsWith("http") ? this.oauth2!.tokenUrl : \`\${this.baseUrl}\${this.oauth2!.tokenUrl}\`;
+    const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded", accept: "application/json" };
+    const params = new URLSearchParams(extra);
+    if (this.oauth2?.clientId) params.set("client_id", this.oauth2.clientId);
+    if (this.oauth2?.clientSecret) params.set("client_secret", this.oauth2.clientSecret);
+    const response = await fetch(tokenUrl, { method: "POST", headers, body: params.toString() });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new ApiError(response.status, text ? safeJson(text) : undefined);
+    }
+    const data = (await response.json()) as { access_token: string; expires_in?: number };
+    this.cachedToken = data.access_token;
+    this.tokenExpiresAt = Date.now() + ((data.expires_in ?? 3600) - 30) * 1000;
+    return data.access_token;
   }
 
   private buildUrl(path: string, query: Record<string, unknown> | undefined): URL {

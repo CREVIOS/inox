@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/CREVIOS/inox/blob/main/SECURITY.md
+    about: Please report security issues privately per our security policy.
+  - name: Docs & live demo
+    url: https://crevios.github.io/inox/
+    about: Features, proof, and the capability matrix.

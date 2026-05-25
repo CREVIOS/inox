@@ -139,6 +139,82 @@ public sealed class ApiException : Exception
 `;
 }
 
+function csharpOauthFlows(oauth: ApiIR["client"]["oauth2"]): string {
+  if (!oauth || (!oauth.authorization_url && !oauth.device_authorization_url)) return "";
+  const tokenPost = `
+    private async Task<string> OAuthTokenRequestAsync(Dictionary<string, string> form)
+    {
+        var url = _oauthTokenUrl.StartsWith("http") ? _oauthTokenUrl : _baseUrl + _oauthTokenUrl;
+        if (!string.IsNullOrEmpty(_clientId)) form["client_id"] = _clientId!;
+        if (!string.IsNullOrEmpty(_clientSecret)) form["client_secret"] = _clientSecret!;
+        using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = new FormUrlEncodedContent(form) };
+        var resp = await _http.SendAsync(req);
+        var text = await resp.Content.ReadAsStringAsync();
+        if ((int)resp.StatusCode is < 200 or >= 300) throw new ApiException((int)resp.StatusCode, text);
+        var node = JsonNode.Parse(text);
+        _cachedToken = node?["access_token"]?.GetValue<string>();
+        var expires = node?["expires_in"]?.GetValue<int>() ?? 3600;
+        _tokenExpiry = DateTimeOffset.UtcNow.AddSeconds(expires - 30);
+        return _cachedToken ?? "";
+    }
+`;
+  const authCode = oauth.authorization_url
+    ? `
+    /// <summary>OAuth2 authorization-code flow: build the consent URL.</summary>
+    public string AuthorizationUrl(string redirectUri, string? state = null, string[]? scopes = null)
+    {
+        var basis = _oauthAuthUrl.StartsWith("http") ? _oauthAuthUrl : _baseUrl + _oauthAuthUrl;
+        var parts = new List<string> { "response_type=code" };
+        if (!string.IsNullOrEmpty(_clientId)) parts.Add("client_id=" + Uri.EscapeDataString(_clientId!));
+        parts.Add("redirect_uri=" + Uri.EscapeDataString(redirectUri));
+        var chosen = scopes ?? _oauthScopes;
+        if (chosen.Length > 0) parts.Add("scope=" + Uri.EscapeDataString(string.Join(" ", chosen)));
+        if (state != null) parts.Add("state=" + Uri.EscapeDataString(state));
+        return basis + (basis.Contains('?') ? "&" : "?") + string.Join("&", parts);
+    }
+
+    /// <summary>OAuth2 authorization-code flow: exchange the code for an access token.</summary>
+    public Task<string> ExchangeCodeAsync(string code, string redirectUri)
+        => OAuthTokenRequestAsync(new Dictionary<string, string> { ["grant_type"] = "authorization_code", ["code"] = code, ["redirect_uri"] = redirectUri });
+`
+    : "";
+  const device = oauth.device_authorization_url
+    ? `
+    /// <summary>OAuth2 device flow: request a device + user code.</summary>
+    public async Task<JsonNode?> RequestDeviceCodeAsync()
+    {
+        var url = _oauthDeviceUrl.StartsWith("http") ? _oauthDeviceUrl : _baseUrl + _oauthDeviceUrl;
+        var form = new Dictionary<string, string>();
+        if (!string.IsNullOrEmpty(_clientId)) form["client_id"] = _clientId!;
+        if (_oauthScopes.Length > 0) form["scope"] = string.Join(" ", _oauthScopes);
+        using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = new FormUrlEncodedContent(form) };
+        var resp = await _http.SendAsync(req);
+        var text = await resp.Content.ReadAsStringAsync();
+        if ((int)resp.StatusCode is < 200 or >= 300) throw new ApiException((int)resp.StatusCode, text);
+        return JsonNode.Parse(text);
+    }
+
+    /// <summary>OAuth2 device flow: poll the token endpoint until the user authorizes.</summary>
+    public async Task<string> PollDeviceTokenAsync(string deviceCode, int intervalSeconds = 5)
+    {
+        if (intervalSeconds <= 0) intervalSeconds = 5;
+        while (true)
+        {
+            try
+            {
+                return await OAuthTokenRequestAsync(new Dictionary<string, string> { ["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code", ["device_code"] = deviceCode });
+            }
+            catch (ApiException e) when (e.Body.Contains("authorization_pending") || e.Body.Contains("slow_down"))
+            {
+                await Task.Delay(intervalSeconds * 1000);
+            }
+        }
+    }
+`
+    : "";
+  return tokenPost + authCode + device;
+}
+
 function renderCsharpClient(ir: ApiIR, ns: string): string {
   const resources = topLevelResources(ir, "csharp");
   const oauth = ir.client.oauth2;
@@ -190,6 +266,8 @@ ${basic ? "    private readonly string? _basicUser;\n    private readonly string
     private readonly string _oauthTokenUrl = ${quote(oauth?.token_url ?? "")};
     private readonly string[] _oauthScopes = new string[] { ${(oauth?.scopes ?? []).map((scope) => quote(scope)).join(", ")} };
     private readonly string _oauthAuthStyle = ${quote(oauth?.auth_style ?? "post")};
+    private readonly string _oauthAuthUrl = ${quote(oauth?.authorization_url ?? "")};
+    private readonly string _oauthDeviceUrl = ${quote(oauth?.device_authorization_url ?? "")};
     private string? _cachedToken;
     private DateTimeOffset _tokenExpiry = DateTimeOffset.MinValue;
     private readonly Action<IDictionary<string, object?>>? _onRequest;
@@ -242,7 +320,7 @@ ${webhookInit}${init}
 
     private async Task<string?> ResolveBearerAsync()
         => (!string.IsNullOrEmpty(_clientId) && !string.IsNullOrEmpty(_clientSecret)) ? await GetTokenAsync() : _apiKey;
-
+${csharpOauthFlows(oauth)}
     private static string BuildQuery(IDictionary<string, object?>? query)
     {
         if (query == null) return "";
@@ -290,7 +368,7 @@ ${webhookInit}${init}
         return content;
     }
 
-    public async Task<JsonNode?> RequestAsync(string method, string path, IDictionary<string, object?>? query = null, object? body = null, bool multipart = false, IDictionary<string, string>? headers = null, string? idempotencyKey = null, int? maxRetries = null, double? timeoutSeconds = null)
+    public async Task<JsonNode?> RequestAsync(string method, string path, IDictionary<string, object?>? query = null, object? body = null, bool multipart = false, IDictionary<string, string>? headers = null, string? idempotencyKey = null, int? maxRetries = null, double? timeoutSeconds = null, bool formUrlencoded = false, bool textPlain = false)
     {
         var url = _baseUrl + path + BuildQuery(query);
         var bearer = await ResolveBearerAsync();
@@ -301,6 +379,8 @@ ${webhookInit}${init}
             using var req = new HttpRequestMessage(new HttpMethod(method.ToUpperInvariant()), url);
             ApplyHeaders(req, headers, bearer, attempt, false);
             if (multipart && body is IDictionary<string, object?> form) req.Content = BuildMultipart(form);
+            else if (formUrlencoded && body != null) req.Content = new StringContent(EncodeForm(body), Encoding.UTF8, "application/x-www-form-urlencoded");
+            else if (textPlain && body != null) req.Content = new StringContent(body as string ?? body.ToString() ?? "", Encoding.UTF8, "text/plain");
             else if (body != null) req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
             if (_idempotencyHeader != null && method.ToLowerInvariant() != "get" && !req.Headers.Contains(_idempotencyHeader))
                 req.Headers.TryAddWithoutValidation(_idempotencyHeader, idempotencyKey ?? "stainless-retry-" + Guid.NewGuid().ToString("N"));
@@ -344,10 +424,26 @@ ${webhookInit}${init}
 
     // Typed request: deserializes the response into a generated model. [JsonPropertyName] on each
     // model property maps wire names to/from idiomatic C# property names automatically.
-    public async Task<T?> RequestAsync<T>(string method, string path, IDictionary<string, object?>? query = null, object? body = null, bool multipart = false, IDictionary<string, string>? headers = null, string? idempotencyKey = null, int? maxRetries = null, double? timeoutSeconds = null)
+    public async Task<T?> RequestAsync<T>(string method, string path, IDictionary<string, object?>? query = null, object? body = null, bool multipart = false, IDictionary<string, string>? headers = null, string? idempotencyKey = null, int? maxRetries = null, double? timeoutSeconds = null, bool formUrlencoded = false, bool textPlain = false)
     {
-        var node = await RequestAsync(method, path, query, body, multipart, headers, idempotencyKey, maxRetries, timeoutSeconds);
+        var node = await RequestAsync(method, path, query, body, multipart, headers, idempotencyKey, maxRetries, timeoutSeconds, formUrlencoded, textPlain);
         return node == null ? default : node.Deserialize<T>(JsonOpts);
+    }
+
+    // application/x-www-form-urlencoded with bracket notation for nested objects/arrays.
+    private static string EncodeForm(object body)
+    {
+        var node = JsonSerializer.SerializeToNode(body);
+        var parts = new List<string>();
+        void Add(string key, JsonNode? value)
+        {
+            if (value == null) return;
+            if (value is JsonObject obj) { foreach (var kv in obj) Add(key.Length == 0 ? kv.Key : $"{key}[{kv.Key}]", kv.Value); }
+            else if (value is JsonArray arr) { for (var i = 0; i < arr.Count; i++) Add($"{key}[{i}]", arr[i]); }
+            else parts.Add(Uri.EscapeDataString(key) + "=" + Uri.EscapeDataString(value.ToString()));
+        }
+        Add("", node);
+        return string.Join("&", parts);
     }
 
     // Binary download: returns the raw response bytes (octet-stream/audio/image/pdf).
@@ -678,7 +774,13 @@ function renderCsharpMethod(ir: ApiIR, operation: OperationIR, mode: "plain" | "
       ? `body: Client.WithField(body, ${quote(discriminator)}, false)`
       : "body: body"
     : "";
-  const multipart = operation.request?.multipart ? ", multipart: true" : "";
+  const multipart = operation.request?.multipart
+    ? ", multipart: true"
+    : operation.request?.form_urlencoded
+      ? ", formUrlencoded: true"
+      : operation.request?.text_plain
+        ? ", textPlain: true"
+        : "";
   const idem = operation.request ? ", idempotencyKey: idempotencyKey" : "";
   const callArgs = [`query: ${csQueryArg(plan)}`, bodyArg, "headers: headers"].filter(Boolean).join(", ");
   const dep = operation.deprecated ? `    [Obsolete(${typeof operation.deprecated === "string" ? quote(operation.deprecated) : '"Deprecated"'})]\n` : "";

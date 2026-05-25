@@ -49,6 +49,22 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "--version" || command === "-v" || command === "version") {
+    const { createRequire } = await import("node:module");
+    const req = createRequire(import.meta.url);
+    let version = "0.0.0";
+    for (const candidate of ["../../package.json", "../package.json"]) {
+      try {
+        version = (req(candidate) as { version?: string }).version ?? version;
+        break;
+      } catch {
+        // try the next candidate path (dev vs built layout)
+      }
+    }
+    console.log(version);
+    return;
+  }
+
   if (command === "init") {
     await writeSampleFiles(options.force);
     console.log("Wrote sdkgen.yml and openapi.yaml");
