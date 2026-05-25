@@ -214,6 +214,9 @@ ready-to-use SDK repos for popular APIs.
 the full end-to-end generate-and-verify across every language on each push and PR.
 [`.github/workflows/pages.yml`](.github/workflows/pages.yml) deploys the landing site to
 GitHub Pages on every push to `main`.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) publishes
+`@crevious/inox` to npm automatically on every `v*` tag (or `npm version` via manual
+dispatch) — auth comes from the `NPM_TOKEN` repo secret, no manual login.
 
 ## License
 
