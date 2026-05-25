@@ -1,21 +1,40 @@
 {
-  "name": "inox",
+  "name": "@crevios/inox",
   "version": "0.1.0",
-  "private": true,
+  "description": "Self-hosted, air-gapped SDK generator: one OpenAPI spec -> idiomatic SDKs in 6 languages + an MCP server. Zero runtime dependencies, verified on every build.",
   "type": "module",
+  "license": "MIT",
+  "homepage": "https://github.com/CREVIOS/inox",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CREVIOS/inox.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CREVIOS/inox/issues"
+  },
+  "keywords": [
+    "openapi", "sdk", "sdk-generator", "codegen", "mcp", "typescript",
+    "python", "go", "java", "ruby", "csharp", "self-hosted", "air-gapped"
+  ],
   "bin": {
     "inox": "./dist/src/cli.js",
     "sdkgen": "./dist/src/cli.js"
   },
   "files": [
-    "dist/src"
+    "dist/src",
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx tests/e2e.test.ts",
     "inox": "tsx src/cli.ts",
-    "sdkgen": "tsx src/cli.ts"
+    "sdkgen": "tsx src/cli.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "yaml": "^2.9.0"

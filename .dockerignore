@@ -1,0 +1,11 @@
+node_modules
+dist
+generated
+.git
+.github
+site
+assets
+specs/out-*
+specs/*.json
+specs/gallery
+*.log

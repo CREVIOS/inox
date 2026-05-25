@@ -122,15 +122,29 @@ inox studio      Serve the offline Studio web UI
 
 ## Install the `inox` CLI
 
+Pick whichever fits your stack — no Node knowledge required for the bash or Docker paths.
+
 ```bash
-npm install          # install deps
-npm run build        # compile the generator to dist/
-npm link             # put `inox` on your PATH (or: npx inox ...)
-inox --help
+# 1) one-line installer (needs git + Node 22+; installs to ~/.inox, links `inox`)
+curl -fsSL https://raw.githubusercontent.com/CREVIOS/inox/main/install.sh | bash
+
+# 2) npm — run without installing, or install globally
+npx @crevios/inox --help
+npm install -g @crevios/inox
+
+# 3) Docker — zero local toolchain, works from any language/ecosystem
+docker build -t inox .
+docker run --rm -v "$PWD:/work" inox init --force
+docker run --rm -v "$PWD:/work" inox generate --out sdk
+
+# 4) from source (for development)
+npm install && npm run build && npm link        # or: npm run inox -- <cmd>
 ```
 
-For development without building, every command is also available via
-`npm run inox -- <cmd>` (runs the TypeScript source through tsx).
+> Publishing: `npm publish` ships the package (config is ready — scoped, public,
+> builds on publish). The generated SDKs publish themselves — each carries a
+> `.github/workflows/release.yml` that pushes to **npm / PyPI / RubyGems / Maven
+> Central / NuGet / the Go module proxy** via OIDC trusted publishing.
 
 ## Use it — one spec, any language
 
