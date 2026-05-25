@@ -1,6 +1,6 @@
 {
   "name": "@crevious/inox",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Self-hosted, air-gapped SDK generator: one OpenAPI spec -> idiomatic SDKs in 6 languages + an MCP server. Zero runtime dependencies, verified on every build.",
   "type": "module",
   "license": "MIT",
