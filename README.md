@@ -14,7 +14,7 @@ on every build.</p>
   <a href="https://crevios.github.io/inox/"><img src="https://github.com/CREVIOS/inox/actions/workflows/pages.yml/badge.svg" alt="Deploy"></a>
   <img src="https://img.shields.io/badge/license-MIT-6d5efc" alt="MIT">
   <img src="https://img.shields.io/badge/runtime%20deps-0-1fc7e6" alt="Zero dependencies">
-  <img src="https://img.shields.io/badge/real%20specs-11%2F12%20clean-16a34a" alt="11 of 12 specs compile clean">
+  <img src="https://img.shields.io/badge/real%20specs-12%2F12%20clean-16a34a" alt="12 of 12 specs compile clean">
 </p>
 
 <p align="center">
@@ -53,22 +53,22 @@ spec. You declare only package names, the base URL, and the auth scheme.
 ### Tested on real, public specs
 
 Each row is a public OpenAPI spec → minimal config → generated TypeScript SDK →
-`tsc --noEmit`. **11 of 12 compile with zero errors**, no per-spec tuning.
+`tsc --noEmit`. **All 12 compile with zero errors**, no per-spec tuning.
 
 | API | Operations | Types | TS files | `tsc` |
 |---|---:|---:|---:|:---:|
-| Stripe | 587 | 11,275 | 11,356 | ✅ 0 |
-| OpenAI | 242 | 3,119 | 3,160 | ✅ 0 |
-| DigitalOcean | 632 | — | 55 | ✅ 0 |
-| Plaid | 330 | 2,317 | 2,323 | ✅ 0 |
-| Box | 296 | 1,456 | 1,534 | ✅ 0 |
-| Asana | 247 | 1,202 | 1,255 | ✅ 0 |
-| Discord | 233 | 1,111 | 1,132 | ✅ 0 |
-| Ory | 59 | 235 | 244 | ✅ 0 |
-| Twilio | 58 | 83 | 110 | ✅ 0 |
-| Adyen | 28 | 465 | 477 | ✅ 0 |
-| SendGrid | 3 | 7 | 14 | ✅ 0 |
-| GitHub | 1,186 | 6,817 | 6,869 | 68 (in progress) |
+| GitHub | 1,186 | 6,817 | 6,870 | ✅ 0 |
+| DigitalOcean | 632 | — | 56 | ✅ 0 |
+| Stripe | 587 | 11,275 | 11,357 | ✅ 0 |
+| Plaid | 330 | 2,317 | 2,324 | ✅ 0 |
+| Box | 296 | 1,456 | 1,535 | ✅ 0 |
+| Asana | 247 | 1,202 | 1,256 | ✅ 0 |
+| OpenAI | 242 | 3,119 | 3,161 | ✅ 0 |
+| Discord | 233 | 1,111 | 1,133 | ✅ 0 |
+| Ory | 59 | 235 | 245 | ✅ 0 |
+| Twilio | 58 | 83 | 111 | ✅ 0 |
+| Adyen | 28 | 465 | 478 | ✅ 0 |
+| SendGrid | 3 | 7 | 15 | ✅ 0 |
 
 ## Any API → agent tools
 
